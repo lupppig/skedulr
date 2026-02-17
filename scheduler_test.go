@@ -734,3 +734,86 @@ func TestScheduledTasksWithIDs(t *testing.T) {
 		t.Errorf("ScheduleRecurringTask: expected ID %s, got %s", recID, id2)
 	}
 }
+
+func TestProgressReporting(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	processed := make(chan bool, 1)
+	testID := "progress-task"
+
+	sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		skedulr.ReportProgress(ctx, 50)
+		// Give some time for stats to reflect it
+		time.Sleep(100 * time.Millisecond)
+		skedulr.ReportProgress(ctx, 100)
+		processed <- true
+		return nil
+	}, 10, 0).WithID(testID))
+
+	// Wait for task to start and report initial progress
+	time.Sleep(50 * time.Millisecond)
+
+	stats := sch.Stats()
+	found := false
+	for _, tInfo := range stats.ActiveTasks {
+		if tInfo.ID == testID {
+			found = true
+			if tInfo.Progress < 50 {
+				t.Errorf("expected progress >= 50, got %d", tInfo.Progress)
+			}
+		}
+	}
+	if !found {
+		t.Error("task not found in active tasks")
+	}
+
+	<-processed
+}
+
+func TestWorkerPools(t *testing.T) {
+	sch := skedulr.New(
+		skedulr.WithMaxWorkers(2), // Default pool
+		skedulr.WithWorkersForPool("cpu-intensive", 1),
+		skedulr.WithWorkersForPool("io-intensive", 3),
+	)
+	defer sch.ShutDown(context.Background())
+
+	results := make(chan string, 3)
+
+	// CPU-intensive task
+	sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		time.Sleep(50 * time.Millisecond)
+		results <- "cpu"
+		return nil
+	}, 1, 0).WithPool("cpu-intensive"))
+
+	// IO-intensive task
+	sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		time.Sleep(50 * time.Millisecond)
+		results <- "io"
+		return nil
+	}, 1, 0).WithPool("io-intensive"))
+
+	// Default task
+	sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		time.Sleep(50 * time.Millisecond)
+		results <- "default"
+		return nil
+	}, 1, 0))
+
+	// Collect 3 results
+	received := make(map[string]bool)
+	for i := 0; i < 3; i++ {
+		select {
+		case res := <-results:
+			received[res] = true
+		case <-time.After(1 * time.Second):
+			t.Errorf("Timed out waiting for task %d", i)
+		}
+	}
+
+	if !received["cpu"] || !received["io"] || !received["default"] {
+		t.Errorf("Missing results: %+v", received)
+	}
+}

@@ -62,7 +62,8 @@ type Scheduler struct {
 	cond           *sync.Cond
 	queue          taskQueue
 	tasks          map[string]*task
-	jobQueue       chan task
+	poolQueues     map[string]chan task
+	poolWorkers    map[string]int
 	stop           chan struct{}
 	stopped        int32 // Atomic flag to prevent new submissions
 	maxWorkers     int
@@ -120,6 +121,8 @@ type task struct {
 	retryStrategy RetryStrategy
 	attempts      int
 	status        TaskStatus
+	progress      int
+	pool          string
 	typeName      string
 	payload       []byte
 	dependsOn     []string
@@ -129,7 +132,8 @@ type task struct {
 func New(opts ...Option) *Scheduler {
 	s := &Scheduler{
 		tasks:         make(map[string]*task),
-		jobQueue:      make(chan task),
+		poolQueues:    make(map[string]chan task),
+		poolWorkers:   make(map[string]int),
 		queue:         make(taskQueue, 0),
 		stop:          make(chan struct{}),
 		maxWorkers:    5,
@@ -166,7 +170,16 @@ func New(opts ...Option) *Scheduler {
 		}
 	})
 
-	s.spawnWorkers(s.maxWorkers)
+	// Initialize default pool if not explicitly set
+	if _, ok := s.poolQueues["default"]; !ok {
+		s.poolQueues["default"] = make(chan task)
+		s.poolWorkers["default"] = s.maxWorkers
+	}
+
+	// Spawn workers for all pools
+	for pool, count := range s.poolWorkers {
+		s.spawnWorkersForPool(pool, count)
+	}
 
 	return s
 }
@@ -244,7 +257,24 @@ func (s *Scheduler) dequeueLoop() {
 				t := heap.Pop(&s.queue).(*task)
 				atomic.AddInt64(&s.queueSize, -1)
 				s.mu.Unlock()
-				s.jobQueue <- *t
+
+				pool := t.pool
+				if pool == "" {
+					pool = "default"
+				}
+
+				s.mu.Lock()
+				ch, ok := s.poolQueues[pool]
+				if !ok {
+					// Auto-create pool if it doesn't exist, use 1 worker
+					ch = make(chan task)
+					s.poolQueues[pool] = ch
+					s.poolWorkers[pool] = 1
+					s.spawnWorkersForPool(pool, 1)
+				}
+				s.mu.Unlock()
+
+				ch <- *t
 			} else {
 				s.mu.Unlock()
 			}
@@ -267,30 +297,46 @@ func (s *Scheduler) cleanupLoop() {
 	}
 }
 
-func (s *Scheduler) spawnWorkers(n int) {
+func (s *Scheduler) spawnWorkersForPool(pool string, n int) {
 	for i := 0; i < n; i++ {
 		atomic.AddInt32(&s.currentWorkers, 1)
 		s.wg.Add(1)
-		go s.worker()
+		go s.worker(pool)
 	}
 }
 
-func (s *Scheduler) worker() {
+func (s *Scheduler) worker(pool string) {
 	defer s.wg.Done()
-	for t := range s.jobQueue {
-		s.mu.Lock()
-		// Update status by pointer in the tracking map if found
-		if trackTask, ok := s.tasks[t.id]; ok {
-			trackTask.status = StatusRunning
+	s.mu.Lock()
+	ch := s.poolQueues[pool]
+	s.mu.Unlock()
+
+	for {
+		select {
+		case t, ok := <-ch:
+			if !ok {
+				return
+			}
+			s.mu.Lock()
+			if trackTask, ok := s.tasks[t.id]; ok {
+				trackTask.status = StatusRunning
+			}
+			s.mu.Unlock()
+			s.runTask(t)
+		case <-s.stop:
+			return
 		}
-		s.mu.Unlock()
-		s.runTask(t)
 	}
 }
 
 type contextKey string
 
-const taskIDKey contextKey = "task_id"
+type progressFunc func(int)
+
+const (
+	taskIDKey   contextKey = "task_id"
+	progressKey contextKey = "task_progress"
+)
 
 // TaskID returns the task ID associated with the context, if any.
 func TaskID(ctx context.Context) string {
@@ -298,6 +344,20 @@ func TaskID(ctx context.Context) string {
 		return id
 	}
 	return ""
+}
+
+// ReportProgress updates the progress of the current task.
+// percent should be between 0 and 100.
+func ReportProgress(ctx context.Context, percent int) {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	if f, ok := ctx.Value(progressKey).(progressFunc); ok {
+		f(percent)
+	}
 }
 
 func (s *Scheduler) runTask(t task) {
@@ -310,7 +370,17 @@ func (s *Scheduler) runTask(t task) {
 	var ctx context.Context
 	var cancel context.CancelFunc
 
+	updateProgress := func(p int) {
+		s.mu.Lock()
+		if trackTask, ok := s.tasks[t.id]; ok {
+			trackTask.progress = p
+		}
+		s.mu.Unlock()
+	}
+
 	baseCtx := context.WithValue(context.Background(), taskIDKey, t.id)
+	baseCtx = context.WithValue(baseCtx, progressKey, progressFunc(updateProgress))
+
 	if delay > 0 {
 		ctx, cancel = context.WithTimeout(baseCtx, delay)
 	} else {
@@ -368,6 +438,7 @@ func (s *Scheduler) runTask(t task) {
 				trackTask.status = StatusFailed
 			} else {
 				trackTask.status = StatusSucceeded
+				trackTask.progress = 100 // Ensure 100% on success
 			}
 		}
 
@@ -556,6 +627,7 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 		pt := &PersistentTask{
 			ID:        t.id,
 			Key:       t.key,
+			Pool:      t.pool,
 			TypeName:  t.typeName,
 			Payload:   t.payload,
 			Priority:  t.priority,
@@ -591,6 +663,12 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 // WithKey sets a unique key for the task to prevent overlapping executions.
 func (t *task) WithKey(key string) *task {
 	t.key = key
+	return t
+}
+
+// WithPool sets the worker pool for the task.
+func (t *task) WithPool(pool string) *task {
+	t.pool = pool
 	return t
 }
 
@@ -726,12 +804,14 @@ func (s *Scheduler) ShutDown(ctx context.Context) error {
 	s.cond.Broadcast()
 	s.mu.Unlock()
 
-	// Wait for background loops to exit before closing jobQueue
+	// Wait for background loops to exit before closing pool queues
 	s.loopWg.Wait()
 
-	// Safe to close jobQueue now
+	// Safe to close channels now
 	s.mu.Lock()
-	close(s.jobQueue)
+	for _, ch := range s.poolQueues {
+		close(ch)
+	}
 	s.mu.Unlock()
 
 	// Wait for workers or timeout

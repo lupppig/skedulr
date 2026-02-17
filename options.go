@@ -14,12 +14,15 @@ func WithMaxWorkers(n int) Option {
 	}
 }
 
-// WithQueueSize sets the size of the internal job dispatch queue.
+// WithQueueSize sets the size of the internal job dispatch queue for the default pool.
 // Use 0 for strict priority (recommended).
 func WithQueueSize(n int) Option {
 	return func(s *Scheduler) {
 		if n >= 0 {
-			s.jobQueue = make(chan task, n)
+			if s.poolQueues == nil {
+				s.poolQueues = make(map[string]chan task)
+			}
+			s.poolQueues["default"] = make(chan task, n)
 		}
 	}
 }
@@ -31,12 +34,25 @@ func WithTaskTimeout(d time.Duration) Option {
 	}
 }
 
-// WithInitialWorkers spawns an initial pool of workers.
+// WithInitialWorkers spawns an initial pool of workers for the default pool.
 func WithInitialWorkers(n int) Option {
 	return func(s *Scheduler) {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.spawnWorkers(n)
+		if s.poolWorkers == nil {
+			s.poolWorkers = make(map[string]int)
+		}
+		s.poolWorkers["default"] = n
+	}
+}
+
+// WithWorkersForPool sets the number of concurrent workers for a specific pool.
+func WithWorkersForPool(name string, count int) Option {
+	return func(s *Scheduler) {
+		if count > 0 {
+			if s.poolWorkers == nil {
+				s.poolWorkers = make(map[string]int)
+			}
+			s.poolWorkers[name] = count
+		}
 	}
 }
 

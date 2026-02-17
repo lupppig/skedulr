@@ -233,6 +233,7 @@
 			color: white;
 		}
 
+
 		/* Micro-animations */
 		@keyframes pulse {
 			0% {
@@ -305,6 +306,16 @@
 			</div>
 		</div>
 
+		<div class="content-card" style="margin-bottom: 2rem;">
+			<div class="card-header">
+				<h2>Worker Pools</h2>
+			</div>
+			<div id="pool-list"
+				style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
+				<!-- Loaded dynamically -->
+			</div>
+		</div>
+
 		<div class="content-card">
 			<div class="card-header">
 				<h2>Task Logs & Activity</h2>
@@ -316,6 +327,7 @@
 						<th>Type</th>
 						<th>Priority</th>
 						<th>Status</th>
+						<th>Progress</th>
 						<th>Actions</th>
 					</tr>
 				</thead>
@@ -343,6 +355,19 @@
 			document.getElementById('metric-failure').textContent = stats.failure_count;
 			document.getElementById('metric-workers').textContent = stats.current_workers;
 
+			const poolList = document.getElementById('pool-list');
+			poolList.innerHTML = '';
+			(stats.pools || []).forEach(pool => {
+				const card = document.createElement('div');
+				card.style = "background: rgba(255,255,255,0.03); padding: 1rem; border-radius: 12px; border: 1px solid var(--glass-border);";
+				card.innerHTML = `
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">${pool.name}</div>
+                    <div style="font-size: 1.25rem; font-weight: 600; margin: 0.25rem 0;">${pool.workers} Workers</div>
+                    <div style="font-size: 0.75rem; color: var(--primary)">Queue: ${pool.queue_size}</div>
+                `;
+				poolList.appendChild(card);
+			});
+
 			const list = document.getElementById('task-list');
 			list.innerHTML = '';
 
@@ -355,11 +380,46 @@
 					const statusClass = `status-${task.status.toLowerCase()}`;
 					const isTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task.status);
 
+					let progressValue = task.progress || 0;
+					let boxColor = 'var(--primary)';
+					let boxBg = 'rgba(255, 255, 255, 0.05)';
+
+					if (task.status === 'Succeeded') {
+						progressValue = 100;
+						boxColor = '#10b981';
+						boxBg = 'rgba(16, 185, 129, 0.1)';
+					} else if (task.status === 'Failed') {
+						boxColor = '#ef4444';
+						boxBg = 'rgba(239, 68, 68, 0.1)';
+					}
+
+					const progressHtml = `
+						<div style="
+							display: inline-flex;
+							align-items: center;
+							justify-content: center;
+							padding: 4px 10px;
+							border-radius: 6px;
+							background: ${boxBg};
+							border: 1px solid ${boxColor};
+							color: ${boxColor};
+							font-weight: 700;
+							font-size: 0.9rem;
+							min-width: 60px;
+						">
+							${progressValue}%
+						</div>
+					`;
+
 					row.innerHTML = `
                         <td style="font-family: monospace; font-size: 0.75rem;">${task.id}</td>
-                        <td>${task.type || 'In-Memory'}</td>
+                        <td>
+							${task.type || 'In-Memory'}
+							<div style="font-size: 0.7rem; color: var(--text-muted)">Pool: ${task.pool || 'default'}</div>
+						</td>
                         <td>${task.priority}</td>
                         <td><span class="status-badge ${statusClass}">${task.status}</span></td>
+						<td>${progressHtml}</td>
                         <td>
                             ${isTerminal ? '-' : `<button class="cancel-btn" onclick="cancelTask('${task.id}')">Cancel</button>`}
                         </td>
@@ -367,7 +427,7 @@
 					list.appendChild(row);
 				});
 			} else {
-				list.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 2rem;">No system activity detected yet.</td></tr>';
+				list.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">No system activity detected yet.</td></tr>';
 			}
 		}
 

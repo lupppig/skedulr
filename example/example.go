@@ -26,7 +26,9 @@ func main() {
 					fmt.Printf("[Work] Job %s cancelled/stopping!\n", id)
 					return ctx.Err()
 				case <-time.After(1 * time.Second):
-					fmt.Printf("[Work] Job %s progress: %d%%\n", id, (i+1)*10)
+					progress := (i + 1) * 10
+					fmt.Printf("[Work] Job %s progress: %d%%\n", id, progress)
+					skedulr.ReportProgress(ctx, progress)
 				}
 			}
 			fmt.Printf("[Work] Job %s completed.\n", id)
@@ -74,7 +76,7 @@ func main() {
 
 	// Wait for signal
 	<-stop
-	fmt.Println("\n🛑 Shutdown signal received. Starting graceful shutdown...")
+	fmt.Println("\n Shutdown signal received. Starting graceful shutdown...")
 
 	// Create a deadline for the shutdown
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

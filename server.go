@@ -34,6 +34,8 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
 		w.Write(dashboardHTML)
 	})
 
@@ -50,9 +52,11 @@ func (s *Scheduler) Stats() Stats {
 		tasks = append(tasks, TaskInfo{
 			ID:       t.id,
 			Key:      t.key,
+			Pool:     t.pool,
 			Type:     t.typeName,
 			Status:   t.status.String(),
 			Priority: t.priority,
+			Progress: t.progress,
 		})
 	}
 
@@ -61,9 +65,20 @@ func (s *Scheduler) Stats() Stats {
 		history = append(history, TaskInfo{
 			ID:       t.id,
 			Key:      t.key,
+			Pool:     t.pool,
 			Type:     t.typeName,
 			Status:   t.status.String(),
 			Priority: t.priority,
+			Progress: t.progress,
+		})
+	}
+
+	pools := make([]PoolStats, 0, len(s.poolQueues))
+	for name, ch := range s.poolQueues {
+		pools = append(pools, PoolStats{
+			Name:      name,
+			Workers:   s.poolWorkers[name],
+			QueueSize: len(ch),
 		})
 	}
 
@@ -75,25 +90,36 @@ func (s *Scheduler) Stats() Stats {
 		CurrentWorkers: atomic.LoadInt32(&s.currentWorkers),
 		ActiveTasks:    tasks,
 		History:        history,
+		Pools:          pools,
 	}
 }
 
 // Stats holds scheduler metrics.
 type Stats struct {
-	QueueSize      int64      `json:"queue_size"`
-	SuccessCount   int64      `json:"success_count"`
-	FailureCount   int64      `json:"failure_count"`
-	PanicCount     int64      `json:"panic_count"`
-	CurrentWorkers int32      `json:"current_workers"`
-	ActiveTasks    []TaskInfo `json:"active_tasks"`
-	History        []TaskInfo `json:"history"`
+	QueueSize      int64       `json:"queue_size"`
+	SuccessCount   int64       `json:"success_count"`
+	FailureCount   int64       `json:"failure_count"`
+	PanicCount     int64       `json:"panic_count"`
+	CurrentWorkers int32       `json:"current_workers"`
+	ActiveTasks    []TaskInfo  `json:"active_tasks"`
+	History        []TaskInfo  `json:"history"`
+	Pools          []PoolStats `json:"pools"`
+}
+
+// PoolStats holds metrics for a specific worker pool.
+type PoolStats struct {
+	Name      string `json:"name"`
+	Workers   int    `json:"workers"`
+	QueueSize int    `json:"queue_size"`
 }
 
 // TaskInfo holds basic info about a task for the dashboard.
 type TaskInfo struct {
 	ID       string `json:"id"`
 	Key      string `json:"key,omitempty"`
+	Pool     string `json:"pool,omitempty"`
 	Type     string `json:"type,omitempty"`
 	Status   string `json:"status"`
 	Priority int    `json:"priority"`
+	Progress int    `json:"progress"`
 }
