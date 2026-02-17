@@ -452,6 +452,22 @@ func (m *distributedMockStorage) ResolveDependencies(ctx context.Context, parent
 	return ready, nil
 }
 
+func (m *distributedMockStorage) AddToHistory(ctx context.Context, t skedulr.TaskInfo) error {
+	return nil
+}
+
+func (m *distributedMockStorage) GetHistory(ctx context.Context, limit int) ([]skedulr.TaskInfo, error) {
+	return nil, nil
+}
+
+func (m *distributedMockStorage) Enqueue(ctx context.Context, t *skedulr.PersistentTask) error {
+	return nil
+}
+
+func (m *distributedMockStorage) Dequeue(ctx context.Context) (*skedulr.PersistentTask, error) {
+	return nil, nil
+}
+
 func TestDistributedCoordination(t *testing.T) {
 	storage := &distributedMockStorage{
 		tasks:  make(map[string]*skedulr.PersistentTask),
@@ -666,7 +682,7 @@ func TestDashboardHistory(t *testing.T) {
 	}, 10, 0))
 
 	<-done
-	time.Sleep(50 * time.Millisecond) // Wait for runTask to finish cleaning up and recording history
+	time.Sleep(500 * time.Millisecond) // Wait for runTask to finish cleaning up and recording history
 
 	stats := sch.Stats()
 

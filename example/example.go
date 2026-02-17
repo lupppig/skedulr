@@ -15,6 +15,7 @@ import (
 func main() {
 	// 1. Initialize scheduler
 	s := skedulr.New(
+		skedulr.WithStorage(skedulr.NewRedisStorage("redis:6379", "", 0, "")),
 		skedulr.WithMaxWorkers(5),
 		skedulr.WithTaskTimeout(30*time.Second),
 		skedulr.WithJob("long_job", func(ctx context.Context) error {

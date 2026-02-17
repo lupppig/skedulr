@@ -62,7 +62,7 @@ type Scheduler struct {
 	cond           *sync.Cond
 	queue          taskQueue
 	tasks          map[string]*task
-	poolQueues     map[string]chan task
+	poolQueues     map[string]chan *task
 	poolWorkers    map[string]int
 	stop           chan struct{}
 	stopped        int32 // Atomic flag to prevent new submissions
@@ -84,8 +84,6 @@ type Scheduler struct {
 	activeKeys     map[string]struct{}
 	instanceID     string
 	leaseDuration  time.Duration
-	history        []*task
-	historySize    int
 	loopWg         sync.WaitGroup
 }
 
@@ -132,14 +130,14 @@ type task struct {
 func New(opts ...Option) *Scheduler {
 	s := &Scheduler{
 		tasks:         make(map[string]*task),
-		poolQueues:    make(map[string]chan task),
+		poolQueues:    make(map[string]chan *task),
 		poolWorkers:   make(map[string]int),
 		queue:         make(taskQueue, 0),
 		stop:          make(chan struct{}),
 		maxWorkers:    5,
 		maxQueueSize:  1000,
 		registry:      make(map[string]Job),
-		storage:       &InMemoryStorage{},
+		storage:       &InMemoryStorage{history: make([]TaskInfo, 0)},
 		activeKeys:    make(map[string]struct{}),
 		instanceID:    generateId(),
 		leaseDuration: 30 * time.Second, // Default lease
@@ -148,7 +146,6 @@ func New(opts ...Option) *Scheduler {
 
 	s.instanceID = generateId()
 	s.leaseDuration = 30 * time.Second
-	s.historySize = 50
 
 	for _, opt := range opts {
 		opt(s)
@@ -172,7 +169,7 @@ func New(opts ...Option) *Scheduler {
 
 	// Initialize default pool if not explicitly set
 	if _, ok := s.poolQueues["default"]; !ok {
-		s.poolQueues["default"] = make(chan task)
+		s.poolQueues["default"] = make(chan *task)
 		s.poolWorkers["default"] = s.maxWorkers
 	}
 
@@ -222,6 +219,7 @@ func (s *Scheduler) loadTasks() {
 		t := &task{
 			id:       pt.ID,
 			key:      pt.Key,
+			pool:     pt.Pool,
 			job:      job,
 			typeName: pt.TypeName,
 			payload:  pt.Payload,
@@ -230,55 +228,99 @@ func (s *Scheduler) loadTasks() {
 			attempts: pt.Attempts,
 			status:   StatusQueued,
 		}
-		s.Submit(t)
+
+		s.mu.Lock()
+		s.tasks[t.id] = t
+		heap.Push(&s.queue, t)
+		atomic.AddInt64(&s.queueSize, 1)
+		s.cond.Signal()
+		s.mu.Unlock()
 	}
 }
 
 func (s *Scheduler) dequeueLoop() {
 	defer s.loopWg.Done()
 	for {
+		var t *task
+
 		s.mu.Lock()
-		for s.queue.Len() == 0 {
-			select {
-			case <-s.stop:
-				s.mu.Unlock()
-				return
-			default:
-				s.cond.Wait()
+		if s.queue.Len() > 0 {
+			t = heap.Pop(&s.queue).(*task)
+			atomic.AddInt64(&s.queueSize, -1)
+		}
+		s.mu.Unlock()
+
+		if t == nil {
+			pt, err := s.storage.Dequeue(context.Background())
+			if err == nil && pt != nil {
+				claimed, err := s.storage.Claim(context.Background(), pt.ID, s.instanceID, s.leaseDuration)
+				if err == nil && claimed {
+					s.regMu.RLock()
+					job, ok := s.registry[pt.TypeName]
+					s.regMu.RUnlock()
+
+					if ok {
+						t = &task{
+							id:       pt.ID,
+							key:      pt.Key,
+							pool:     pt.Pool,
+							job:      job,
+							typeName: pt.TypeName,
+							payload:  pt.Payload,
+							priority: pt.Priority,
+							timeout:  pt.Timeout,
+							attempts: pt.Attempts,
+							status:   StatusQueued,
+						}
+						s.mu.Lock()
+						s.tasks[t.id] = t
+						s.mu.Unlock()
+					}
+				}
 			}
 		}
 
+		if t != nil {
+			s.dispatchTask(t)
+			continue
+		}
+
+		// Check if we should exit
+		if atomic.LoadInt32(&s.stopped) == 1 {
+			return
+		}
+
+		// Wait for signal or timeout
 		select {
 		case <-s.stop:
-			s.mu.Unlock()
 			return
-		default:
-			if s.queue.Len() > 0 {
-				t := heap.Pop(&s.queue).(*task)
-				atomic.AddInt64(&s.queueSize, -1)
-				s.mu.Unlock()
-
-				pool := t.pool
-				if pool == "" {
-					pool = "default"
-				}
-
-				s.mu.Lock()
-				ch, ok := s.poolQueues[pool]
-				if !ok {
-					// Auto-create pool if it doesn't exist, use 1 worker
-					ch = make(chan task)
-					s.poolQueues[pool] = ch
-					s.poolWorkers[pool] = 1
-					s.spawnWorkersForPool(pool, 1)
-				}
-				s.mu.Unlock()
-
-				ch <- *t
-			} else {
-				s.mu.Unlock()
-			}
+		case <-time.After(100 * time.Millisecond):
+			// Continue to next iteration to check queue and storage
 		}
+	}
+}
+
+func (s *Scheduler) dispatchTask(t *task) bool {
+	pool := t.pool
+	if pool == "" {
+		pool = "default"
+	}
+
+	s.mu.Lock()
+	ch, ok := s.poolQueues[pool]
+	if !ok {
+		ch = make(chan *task)
+		s.poolQueues[pool] = ch
+		s.poolWorkers[pool] = 1
+		s.spawnWorkersForPool(pool, 1)
+	}
+	s.mu.Unlock()
+
+	select {
+	case ch <- t:
+		return true
+	case <-s.stop:
+		return false
 	}
 }
 
@@ -360,7 +402,7 @@ func ReportProgress(ctx context.Context, percent int) {
 	}
 }
 
-func (s *Scheduler) runTask(t task) {
+func (s *Scheduler) runTask(t *task) {
 	// Individual task timeout or default scheduler timeout
 	delay := t.timeout
 	if delay == 0 {
@@ -502,22 +544,27 @@ func (s *Scheduler) runTask(t task) {
 	// Simple approach: After terminal state, remove from map.
 	// Record history before removing from active tasks
 	s.mu.Lock()
-	s.recordHistory(t.id)
+	s.recordHistory(t)
 	delete(s.tasks, t.id)
 	s.mu.Unlock()
 }
 
-func (s *Scheduler) recordHistory(id string) {
-	t, ok := s.tasks[id]
-	if !ok {
+func (s *Scheduler) recordHistory(t *task) {
+	if t == nil {
 		return
 	}
 
-	// Keep history within historySize limit
-	if len(s.history) >= s.historySize {
-		s.history = s.history[1:]
+	info := TaskInfo{
+		ID:       t.id,
+		Key:      t.key,
+		Pool:     t.pool,
+		Type:     t.typeName,
+		Status:   t.status.String(),
+		Priority: t.priority,
+		Progress: t.progress,
 	}
-	s.history = append(s.history, t)
+
+	s.storage.AddToHistory(context.Background(), info)
 }
 
 // Status returns the current status of a task.
@@ -531,7 +578,7 @@ func (s *Scheduler) Status(id string) TaskStatus {
 	return StatusUnknown
 }
 
-func (s *Scheduler) handleFailure(t task, err error) {
+func (s *Scheduler) handleFailure(t *task, err error) {
 	atomic.AddInt64(&s.failureCount, 1)
 
 	if t.retryStrategy != nil {
@@ -647,9 +694,9 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 		if err := s.storage.Save(context.Background(), pt); err != nil {
 			return "", fmt.Errorf("failed to persist task: %w", err)
 		}
-		// Claim immediately
-		if _, err := s.storage.Claim(context.Background(), t.id, s.instanceID, s.leaseDuration); err != nil {
-			return "", fmt.Errorf("failed to claim task on submission: %w", err)
+
+		if err := s.storage.Enqueue(context.Background(), pt); err != nil {
+			return "", fmt.Errorf("failed to enqueue task: %w", err)
 		}
 	}
 

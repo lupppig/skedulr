@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -34,10 +35,17 @@ type Storage interface {
 	SubscribeCancel(ctx context.Context, onCancel func(id string)) error
 	SaveWaiting(ctx context.Context, t *PersistentTask) error
 	ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error)
+	Enqueue(ctx context.Context, t *PersistentTask) error
+	Dequeue(ctx context.Context) (*PersistentTask, error)
+	AddToHistory(ctx context.Context, t TaskInfo) error
+	GetHistory(ctx context.Context, limit int) ([]TaskInfo, error)
 }
 
-// InMemoryStorage is a no-op storage implementation used as a fallback.
-type InMemoryStorage struct{}
+// InMemoryStorage is a basic storage implementation used as a fallback.
+type InMemoryStorage struct {
+	mu      sync.Mutex
+	history []TaskInfo
+}
 
 func (s *InMemoryStorage) Save(ctx context.Context, t *PersistentTask) error      { return nil }
 func (s *InMemoryStorage) Delete(ctx context.Context, id string) error            { return nil }
@@ -55,6 +63,27 @@ func (s *InMemoryStorage) SubscribeCancel(ctx context.Context, onCancel func(id 
 func (s *InMemoryStorage) SaveWaiting(ctx context.Context, t *PersistentTask) error { return nil }
 func (s *InMemoryStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error) {
 	return nil, nil
+}
+func (s *InMemoryStorage) AddToHistory(ctx context.Context, t TaskInfo) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.history = append([]TaskInfo{t}, s.history...)
+	if len(s.history) > 100 {
+		s.history = s.history[:100]
+	}
+	return nil
+}
+func (s *InMemoryStorage) Enqueue(ctx context.Context, t *PersistentTask) error { return nil }
+func (s *InMemoryStorage) Dequeue(ctx context.Context) (*PersistentTask, error) { return nil, nil }
+func (s *InMemoryStorage) GetHistory(ctx context.Context, limit int) ([]TaskInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit > len(s.history) {
+		limit = len(s.history)
+	}
+	res := make([]TaskInfo, limit)
+	copy(res, s.history[:limit])
+	return res, nil
 }
 
 // RedisStorage implements Storage using Redis.
@@ -214,4 +243,66 @@ func (s *RedisStorage) SubscribeCancel(ctx context.Context, onCancel func(id str
 		}
 	}()
 	return nil
+}
+
+func (s *RedisStorage) AddToHistory(ctx context.Context, t TaskInfo) error {
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	key := s.prefix + "history"
+	pipe := s.client.Pipeline()
+	pipe.LPush(ctx, key, data)
+	pipe.LTrim(ctx, key, 0, 99) // Keep last 100
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (s *RedisStorage) Enqueue(ctx context.Context, t *PersistentTask) error {
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	key := s.prefix + "queue"
+	// Use ZSET for priority queue. Score is priority.
+	return s.client.ZAdd(ctx, key, redis.Z{
+		Score:  float64(t.Priority),
+		Member: data,
+	}).Err()
+}
+
+func (s *RedisStorage) Dequeue(ctx context.Context) (*PersistentTask, error) {
+	key := s.prefix + "queue"
+	// Pop highest priority task
+	res, err := s.client.ZPopMax(ctx, key).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if len(res) == 0 {
+		return nil, nil
+	}
+	var t PersistentTask
+	if err := json.Unmarshal([]byte(res[0].Member.(string)), &t); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *RedisStorage) GetHistory(ctx context.Context, limit int) ([]TaskInfo, error) {
+	key := s.prefix + "history"
+	data, err := s.client.LRange(ctx, key, 0, int64(limit-1)).Result()
+	if err != nil {
+		return nil, err
+	}
+	history := make([]TaskInfo, 0, len(data))
+	for _, d := range data {
+		var t TaskInfo
+		if err := json.Unmarshal([]byte(d), &t); err == nil {
+			history = append(history, t)
+		}
+	}
+	return history, nil
 }

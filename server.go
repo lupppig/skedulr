@@ -1,6 +1,7 @@
 package skedulr
 
 import (
+	"context"
 	_ "embed"
 	"encoding/json"
 	"net/http"
@@ -60,18 +61,7 @@ func (s *Scheduler) Stats() Stats {
 		})
 	}
 
-	history := make([]TaskInfo, 0, len(s.history))
-	for _, t := range s.history {
-		history = append(history, TaskInfo{
-			ID:       t.id,
-			Key:      t.key,
-			Pool:     t.pool,
-			Type:     t.typeName,
-			Status:   t.status.String(),
-			Priority: t.priority,
-			Progress: t.progress,
-		})
-	}
+	history, _ := s.storage.GetHistory(context.Background(), 50)
 
 	pools := make([]PoolStats, 0, len(s.poolQueues))
 	for name, ch := range s.poolQueues {

@@ -20,9 +20,9 @@ func WithQueueSize(n int) Option {
 	return func(s *Scheduler) {
 		if n >= 0 {
 			if s.poolQueues == nil {
-				s.poolQueues = make(map[string]chan task)
+				s.poolQueues = make(map[string]chan *task)
 			}
-			s.poolQueues["default"] = make(chan task, n)
+			s.poolQueues["default"] = make(chan *task, n)
 		}
 	}
 }
