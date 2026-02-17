@@ -50,10 +50,19 @@ func main() {
 		}
 	}()
 
-	// 3. Submit several tasks to populate the dashboard
-	for i := 0; i < 3; i++ {
-		s.Submit(skedulr.NewPersistentTask("long_job", nil, 10, 0))
-	}
+	// 3. Submit several tasks with descriptive IDs to populate the dashboard
+	s.Submit(skedulr.NewPersistentTask("long_job", nil, 10, 0).WithID("initial-sync-01"))
+	s.Submit(skedulr.NewPersistentTask("long_job", nil, 5, 0).WithID("cleanup-logs-weekly"))
+	s.Submit(skedulr.NewPersistentTask("long_job", nil, 1, 0).WithID("index-refresh-task"))
+
+	// Schedule a recurring task with a descriptive ID
+	s.ScheduleRecurringTask(
+		skedulr.NewTask(func(ctx context.Context) error {
+			fmt.Println("⏰ Heartbeat task running...")
+			return nil
+		}, 10, 0).WithID("system-heartbeat"),
+		1*time.Minute,
+	)
 
 	fmt.Println("Open http://localhost:8080 to see the dashboard.")
 	fmt.Println("Press Ctrl+C to trigger graceful shutdown.")

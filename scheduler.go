@@ -607,22 +607,22 @@ func (t *task) DependsOn(ids ...string) *task {
 
 // ScheduleOnce schedules a job to run at a specific time.
 func (s *Scheduler) ScheduleOnce(job Job, at time.Time, priority int) (string, error) {
+	t := NewTask(job, priority, 0)
+	return s.ScheduleOnceTask(t, at)
+}
+
+// ScheduleOnceTask schedules a task to run at a specific time.
+// This allows providing a custom Task ID or key.
+func (s *Scheduler) ScheduleOnceTask(t *task, at time.Time) (string, error) {
 	if atomic.LoadInt32(&s.stopped) == 1 {
 		return "", ErrSchedulerStopped
 	}
 
-	id := generateId()
 	ctx, cancel := context.WithCancel(context.Background())
-
-	t := &task{
-		id:       id,
-		job:      job,
-		priority: priority,
-		cancel:   cancel,
-	}
+	t.cancel = cancel
 
 	s.mu.Lock()
-	s.tasks[id] = t
+	s.tasks[t.id] = t
 	s.mu.Unlock()
 
 	delay := time.Until(at)
@@ -640,27 +640,27 @@ func (s *Scheduler) ScheduleOnce(job Job, at time.Time, priority int) (string, e
 		}
 	}()
 
-	return id, nil
+	return t.id, nil
 }
 
 // ScheduleRecurring schedules a job to run at fixed intervals.
 func (s *Scheduler) ScheduleRecurring(job Job, interval time.Duration, priority int) (string, error) {
+	t := NewTask(job, priority, interval)
+	return s.ScheduleRecurringTask(t, interval)
+}
+
+// ScheduleRecurringTask schedules a recurring task at fixed intervals.
+// This allows providing a custom Task ID or key.
+func (s *Scheduler) ScheduleRecurringTask(t *task, interval time.Duration) (string, error) {
 	if atomic.LoadInt32(&s.stopped) == 1 {
 		return "", ErrSchedulerStopped
 	}
 
-	id := generateId()
 	ctx, cancel := context.WithCancel(context.Background())
-
-	t := &task{
-		id:       id,
-		job:      job,
-		priority: priority,
-		cancel:   cancel,
-	}
+	t.cancel = cancel
 
 	s.mu.Lock()
-	s.tasks[id] = t
+	s.tasks[t.id] = t
 	s.mu.Unlock()
 
 	go func() {
@@ -671,8 +671,18 @@ func (s *Scheduler) ScheduleRecurring(job Job, interval time.Duration, priority 
 		for {
 			select {
 			case <-ticker.C:
-				// Each execution is a new task instance in the queue
-				s.Submit(NewTask(job, priority, interval))
+				// Each execution is a new task instance in the queue,
+				// but we preserve the type etc.
+				child := &task{
+					id:            generateId(),
+					job:           t.job,
+					typeName:      t.typeName,
+					payload:       t.payload,
+					priority:      t.priority,
+					timeout:       t.timeout,
+					retryStrategy: t.retryStrategy,
+				}
+				s.Submit(child)
 			case <-ctx.Done():
 				return
 			case <-s.stop:
@@ -681,7 +691,7 @@ func (s *Scheduler) ScheduleRecurring(job Job, interval time.Duration, priority 
 		}
 	}()
 
-	return id, nil
+	return t.id, nil
 }
 
 func (s *Scheduler) Cancel(id string) error {

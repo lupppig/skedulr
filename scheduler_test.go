@@ -691,3 +691,46 @@ func TestDashboardHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestCustomTaskIDs(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	customID := "my-awesome-task"
+	id, err := sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		return nil
+	}, 10, 0).WithID(customID))
+
+	if err != nil {
+		t.Fatalf("failed to submit task: %v", err)
+	}
+
+	if id != customID {
+		t.Errorf("expected ID %s, got %s", customID, id)
+	}
+}
+
+func TestScheduledTasksWithIDs(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	// Test ScheduleOnceTask
+	onceID := "once-task-id"
+	id1, _ := sch.ScheduleOnceTask(
+		skedulr.NewTask(func(ctx context.Context) error { return nil }, 10, 0).WithID(onceID),
+		time.Now().Add(100*time.Millisecond),
+	)
+	if id1 != onceID {
+		t.Errorf("ScheduleOnceTask: expected ID %s, got %s", onceID, id1)
+	}
+
+	// Test ScheduleRecurringTask
+	recID := "recurring-task-id"
+	id2, _ := sch.ScheduleRecurringTask(
+		skedulr.NewTask(func(ctx context.Context) error { return nil }, 10, 0).WithID(recID),
+		100*time.Millisecond,
+	)
+	if id2 != recID {
+		t.Errorf("ScheduleRecurringTask: expected ID %s, got %s", recID, id2)
+	}
+}

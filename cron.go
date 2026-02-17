@@ -8,27 +8,27 @@ import (
 	"time"
 )
 
-// scheduleCronInternal parses a simple cron string and schedules the job.
+// ScheduleCron parses a simple cron string and schedules the job.
 // Supported: "minute hour day month weekday"
 // "*" means all.
 func (s *Scheduler) ScheduleCron(spec string, job Job, priority int) (string, error) {
+	t := NewTask(job, priority, 0)
+	return s.ScheduleCronTask(t, spec)
+}
+
+// ScheduleCronTask schedules a cron job using a provided task object.
+// This allows providing a custom Task ID or key.
+func (s *Scheduler) ScheduleCronTask(t *task, spec string) (string, error) {
 	fields := strings.Fields(spec)
 	if len(fields) != 5 {
 		return "", fmt.Errorf("invalid cron spec: %s", spec)
 	}
 
-	id := generateId()
 	ctx, cancel := context.WithCancel(context.Background())
-
-	t := &task{
-		id:       id,
-		job:      job,
-		priority: priority,
-		cancel:   cancel,
-	}
+	t.cancel = cancel
 
 	s.mu.Lock()
-	s.tasks[id] = t
+	s.tasks[t.id] = t
 	s.mu.Unlock()
 
 	go func() {
@@ -45,7 +45,18 @@ func (s *Scheduler) ScheduleCron(spec string, job Job, priority int) (string, er
 			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
-				s.Submit(NewTask(job, priority, 0))
+				// Each execution is a new task instance in the queue,
+				// but we preserve the type etc.
+				child := &task{
+					id:            generateId(),
+					job:           t.job,
+					typeName:      t.typeName,
+					payload:       t.payload,
+					priority:      t.priority,
+					timeout:       t.timeout,
+					retryStrategy: t.retryStrategy,
+				}
+				s.Submit(child)
 				// Wait for the next minute to avoid double scheduling if next is very close
 				time.Sleep(1 * time.Second)
 			case <-ctx.Done():
@@ -58,7 +69,7 @@ func (s *Scheduler) ScheduleCron(spec string, job Job, priority int) (string, er
 		}
 	}()
 
-	return id, nil
+	return t.id, nil
 }
 
 func (s *Scheduler) nextExecution(from time.Time, fields []string) time.Time {
