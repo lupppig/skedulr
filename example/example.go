@@ -1,22 +1,40 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
+
+	schedulr "github.com/kehl-gopher/skedulr"
 )
 
-// simulate job being run
-func sleepTask() {
-	fmt.Println("starting job")
-	time.Sleep(5 * time.Second)
-	fmt.Println("finished sleeping ntoor")
-}
-
-func sleepTask2() {
-	fmt.Println("starting second job")
-	time.Sleep(3 * time.Second)
-	fmt.Println("finished second job")
-}
-
 func main() {
+	// Initialize scheduler with custom options
+	// The package name is 'schedulr' inside the 'skedulr' module
+	s := schedulr.New(
+		schedulr.WithMaxWorkers(5),
+		schedulr.WithTaskTimeout(10*time.Second),
+	)
+	defer s.ShutDown()
+
+	// 1. Submit a simple task
+	s.Submit(schedulr.NewTask(func(ctx context.Context) error {
+		fmt.Println("Running a one-off task")
+		return nil
+	}, 10, 0))
+
+	// 2. Schedule a task once
+	s.ScheduleOnce(func(ctx context.Context) error {
+		fmt.Println("Delayed task executed")
+		return nil
+	}, time.Now().Add(2*time.Second), 5)
+
+	// 3. Schedule a recurring task
+	s.ScheduleRecurring(func(ctx context.Context) error {
+		fmt.Println("Recurring heartbeat...")
+		return nil
+	}, 1*time.Second, 1)
+
+	// Wait for a bit to see it in action
+	time.Sleep(5 * time.Second)
 }

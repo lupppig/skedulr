@@ -1,4 +1,2 @@
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/kehl-gopher/schedulr v0.0.0-20250712202031-2544d149536d h1:6UJzH/4xcm+RebMtEgdyB/sTA8JBpUsSZBgPKfIBE8g=
-github.com/kehl-gopher/schedulr v0.0.0-20250712202031-2544d149536d/go.mod h1:Uv9V5VnFBhVzvjpFtaV0yaAq7PM3u8iVEMg8Rak8d+I=

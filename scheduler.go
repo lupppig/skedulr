@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-// --------------------------------------- task queue ---------------------------------
-
 type taskQueue []*task
 
 func (tsk *taskQueue) Push(ts interface{}) {
@@ -44,222 +42,279 @@ func (tsk taskQueue) Swap(i, j int) {
 }
 
 // -------------------------------------- Job run ----------------------------------------
-type JobFunc func() error
+// Job defines the function signature for a task.
+type Job func(ctx context.Context) error
 
-type Scheduler interface {
-	scaleWorker()
-	ShutDown() error
-	ScheduleOnce(job JobFunc, at time.Time, priority int) (string, error)
-	ScheduleRecurring(job JobFunc, interval time.Duration, priority int) (string, error)
-	Submit(t task) string
-	Cancel(id string) error
-	dequeueAndRun()
-	executeTask(n int)
-}
-
-type schedulr struct {
-	schedulrLock  *sync.Mutex
-	queueTask     taskQueue
-	tasks         map[string]task
-	jobQueue      chan task
-	stopChan      chan struct{}
-	currentWorker int32
-	wg            *sync.WaitGroup
+type Scheduler struct {
+	mu             sync.Mutex
+	queue          taskQueue
+	tasks          map[string]*task
+	jobQueue       chan task
+	stop           chan struct{}
+	maxWorkers     int
+	currentWorkers int32
+	queueSize      int64 // Atomic tracker for queue size
+	defaultTimeout time.Duration
+	wg             sync.WaitGroup
 }
 
 type task struct {
-	id          string
-	job         JobFunc
-	taskTimeOut time.Duration
-	priority    int
-	cancel      context.CancelFunc
+	id       string
+	job      Job
+	timeout  time.Duration
+	priority int
+	cancel   context.CancelFunc
 }
 
-func SchedulerInit() Scheduler {
-	sch := &schedulr{
-		schedulrLock:  new(sync.Mutex),
-		tasks:         make(map[string]task),
-		jobQueue:      make(chan task, 100),
-		queueTask:     make(taskQueue, 0),
-		stopChan:      make(chan struct{}),
-		currentWorker: 0,
-		wg:            new(sync.WaitGroup),
+// New creates a new Scheduler with the provided options.
+func New(opts ...Option) *Scheduler {
+	s := &Scheduler{
+		tasks:      make(map[string]*task),
+		jobQueue:   make(chan task, 100),
+		queue:      make(taskQueue, 0),
+		stop:       make(chan struct{}),
+		maxWorkers: 10, // Default max workers
 	}
-	go sch.dequeueAndRun()
-	go sch.scaleWorker()
-	return sch
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	go s.dequeueLoop()
+	go s.scalingLoop()
+	return s
 }
 
-func (s *schedulr) dequeueAndRun() {
+func (s *Scheduler) dequeueLoop() {
 	for {
-		s.schedulrLock.Lock()
-		if s.queueTask.Len() > 0 {
-			task := heap.Pop(&s.queueTask).(*task)
-			s.schedulrLock.Unlock()
-			s.jobQueue <- *task
-		} else {
-			s.schedulrLock.Unlock()
-			time.Sleep(100 * time.Millisecond)
+		s.mu.Lock()
+		if s.queue.Len() > 0 {
+			t := heap.Pop(&s.queue).(*task)
+			atomic.AddInt64(&s.queueSize, -1)
+			s.mu.Unlock()
+			s.jobQueue <- *t
+			continue
 		}
+		s.mu.Unlock()
+
 		select {
-		case <-s.stopChan:
+		case <-s.stop:
 			return
-		default:
+		case <-time.After(100 * time.Millisecond):
+			// periodically check if no signal is used (Wait/Signal could be better but this is fine for now)
 		}
 	}
 }
 
-func (sch *schedulr) scaleWorker() {
-	tick := time.NewTicker(3 * time.Second)
+func (s *Scheduler) scalingLoop() {
+	tick := time.NewTicker(1 * time.Second) // More frequent check
 	defer tick.Stop()
+
+	// Initial scale check
+	s.checkScale()
 
 	for {
 		select {
 		case <-tick.C:
-			sch.schedulrLock.Lock()
-			workers := calculateWorkerPertTask(sch.queueTask.Len())
-			if workers > int(sch.currentWorker) {
-				w := workers - int(sch.currentWorker)
-				sch.schedulrLock.Unlock()
-				sch.executeTask(w)
-			} else {
-				sch.schedulrLock.Unlock()
-			}
-		case <-sch.stopChan:
+			s.checkScale()
+		case <-s.stop:
 			return
 		}
 	}
 }
 
-func (sch *schedulr) executeTask(n int) {
-	for i := 0; i < n; i++ {
-		atomic.AddInt32(&sch.currentWorker, 1)
-		sch.wg.Add(1)
-		go func() {
-			defer sch.wg.Done()
-			for {
-				select {
-				case task, ok := <-sch.jobQueue:
-					if ok {
-						fmt.Printf("[Task %s] Starting with priority %d\n", task.id, task.priority)
-						var done = make(chan error)
-						ctx, cancel := context.WithTimeout(context.Background(), task.taskTimeOut)
-						defer cancel()
-						go func() {
-							done <- task.job()
-						}()
-						select {
-						case err := <-done:
-							if err != nil {
-								fmt.Printf("[Task %s] failed executing err: %s", task.id, err.Error())
-							}
-						case <-ctx.Done():
-							// will handle task retries later on
-							fmt.Printf("task timeout before finishing execution")
-						}
-					}
-				case <-sch.stopChan:
-					return
-				}
-			}
-		}()
-	}
-}
+func (s *Scheduler) checkScale() {
+	currentQueueSize := int(atomic.LoadInt64(&s.queueSize))
+	target := calculateWorkerPertTask(currentQueueSize)
+	current := int(atomic.LoadInt32(&s.currentWorkers))
 
-func NewTask(timeOut time.Duration, job JobFunc, priority int) task {
-	return task{id: generateId(), taskTimeOut: timeOut, job: job, priority: priority}
-}
-
-func (s *schedulr) ScheduleOnce(job JobFunc, at time.Time, priority int) (string, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	id := generateId()
-
-	t := task{
-		id:     id,
-		job:    job,
-		cancel: cancel,
-		priority: priority,
-	}
-
-	delay := time.Until(at)
-
-	s.schedulrLock.Lock()
-	s.tasks[id] = t
-	s.schedulrLock.Unlock()
-
-	after := time.NewTimer(delay)
-	go func() {
-		select {
-		case <-after.C:
-			s.Submit(t)
-		case <-ctx.Done():
-			after.Stop()
+	if target > current && current < s.maxWorkers {
+		s.mu.Lock()
+		toSpawn := target - current
+		if toSpawn+current > s.maxWorkers {
+			toSpawn = s.maxWorkers - current
 		}
-	}()
-	return id, nil
+		if toSpawn > 0 {
+			s.spawnWorkers(toSpawn)
+		}
+		s.mu.Unlock()
+	}
 }
 
-func (s *schedulr) Submit(t task) string {
-	s.schedulrLock.Lock()
-	heap.Push(&s.queueTask, &t)
-	s.schedulrLock.Unlock()
+func (s *Scheduler) spawnWorkers(n int) {
+	for i := 0; i < n; i++ {
+		atomic.AddInt32(&s.currentWorkers, 1)
+		s.wg.Add(1)
+		go s.worker()
+	}
+}
+
+func (s *Scheduler) worker() {
+	defer s.wg.Done()
+	for {
+		select {
+		case t, ok := <-s.jobQueue:
+			if !ok {
+				return
+			}
+			s.runTask(t)
+		case <-s.stop:
+			return
+		}
+	}
+}
+
+func (s *Scheduler) runTask(t task) {
+	// Individual task timeout or default scheduler timeout
+	delay := t.timeout
+	if delay == 0 {
+		delay = s.defaultTimeout
+	}
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+
+	if delay > 0 {
+		ctx, cancel = context.WithTimeout(context.Background(), delay)
+	} else {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- t.job(ctx)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			// In production, we'd log this properly
+		}
+	case <-ctx.Done():
+	}
+}
+
+// NewTask creates a new task instance.
+func NewTask(job Job, priority int, timeout time.Duration) *task {
+	return &task{
+		id:       generateId(),
+		job:      job,
+		priority: priority,
+		timeout:  timeout,
+	}
+}
+
+// Submit adds a task to the priority queue.
+func (s *Scheduler) Submit(t *task) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	heap.Push(&s.queue, t)
+	atomic.AddInt64(&s.queueSize, 1)
 	return t.id
 }
 
-func (sch *schedulr) ScheduleRecurring(job JobFunc, interval time.Duration, priority int) (string, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+// ScheduleOnce schedules a job to run at a specific time.
+func (s *Scheduler) ScheduleOnce(job Job, at time.Time, priority int) (string, error) {
 	id := generateId()
+	ctx, cancel := context.WithCancel(context.Background())
 
-	t := task{
+	t := &task{
 		id:       id,
 		job:      job,
-		cancel:   cancel,
 		priority: priority,
+		cancel:   cancel,
 	}
-	sch.schedulrLock.Lock()
-	sch.tasks[id] = t
-	sch.schedulrLock.Unlock()
 
-	tick := time.NewTicker(interval)
+	s.mu.Lock()
+	s.tasks[id] = t
+	s.mu.Unlock()
+
+	delay := time.Until(at)
+	timer := time.NewTimer(delay)
 
 	go func() {
+		defer cancel()
+		select {
+		case <-timer.C:
+			s.Submit(t)
+		case <-ctx.Done():
+			timer.Stop()
+		case <-s.stop:
+			timer.Stop()
+		}
+	}()
+
+	return id, nil
+}
+
+// ScheduleRecurring schedules a job to run at fixed intervals.
+func (s *Scheduler) ScheduleRecurring(job Job, interval time.Duration, priority int) (string, error) {
+	id := generateId()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	t := &task{
+		id:       id,
+		job:      job,
+		priority: priority,
+		cancel:   cancel,
+	}
+
+	s.mu.Lock()
+	s.tasks[id] = t
+	s.mu.Unlock()
+
+	go func() {
+		defer cancel()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
 		for {
 			select {
-			case <-tick.C:
-				newTask := NewTask(interval, job, priority) // create an instance of each task and add to queue
-				sch.Submit(newTask)
+			case <-ticker.C:
+				// Each execution is a new task instance in the queue
+				s.Submit(NewTask(job, priority, interval))
 			case <-ctx.Done():
-				tick.Stop()
+				return
+			case <-s.stop:
 				return
 			}
 		}
 	}()
+
 	return id, nil
 }
 
-func (sch *schedulr) Cancel(id string) error {
-	sch.schedulrLock.Lock()
-	defer sch.schedulrLock.Unlock()
+// Cancel cancels a scheduled or recurring task.
+func (s *Scheduler) Cancel(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	task, exist := sch.tasks[id]
-	if !exist {
+	t, ok := s.tasks[id]
+	if !ok {
 		return fmt.Errorf("task not found: %s", id)
 	}
-	task.cancel()
-	delete(sch.tasks, id)
+
+	if t.cancel != nil {
+		t.cancel()
+	}
+	delete(s.tasks, id)
 	return nil
 }
 
-func (sch *schedulr) ShutDown() error {
-	close(sch.stopChan)
-	sch.wg.Wait()
-	sch.schedulrLock.Lock()
-	for _, t := range sch.tasks {
+// ShutDown gracefully stops the scheduler, waiting for active workers to finish.
+func (s *Scheduler) ShutDown() error {
+	close(s.stop)
+	s.wg.Wait()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, t := range s.tasks {
 		if t.cancel != nil {
 			t.cancel()
 		}
 	}
-	sch.schedulrLock.Unlock()
-	close(sch.jobQueue)
+	close(s.jobQueue)
 	return nil
 }
