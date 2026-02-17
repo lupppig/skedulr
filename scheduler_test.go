@@ -244,7 +244,19 @@ func TestPriorityTaskExecutionOrder(t *testing.T) {
 		return nil
 	}, 100, 0))
 
-	// Submit tasks with different priorities in a "random" order
+	// Give it a moment to be picked up by the worker
+	time.Sleep(50 * time.Millisecond)
+
+	// This task will be popped by dequeueLoop and block on the jobQueue
+	// We use high priority to ensure it's picked up before others
+	_, _ = sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		mu.Lock()
+		executionOrder = append(executionOrder, 999)
+		mu.Unlock()
+		return nil
+	}, 99, 0))
+
+	// Now these will definitely stay in the heap and be sorted
 	priorities := []int{1, 10, 5, 20, 2}
 	for _, p := range priorities {
 		priority := p
@@ -266,8 +278,9 @@ func TestPriorityTaskExecutionOrder(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Correct priority order: 20, 10, 5, 2, 1
-	expected := []int{20, 10, 5, 2, 1}
+	// First is 999 (the one held by dequeueLoop)
+	// Then 20, 10, 5, 2, 1
+	expected := []int{999, 20, 10, 5, 2, 1}
 	if len(executionOrder) != len(expected) {
 		t.Fatalf("expected %d tasks, got %d", len(expected), len(executionOrder))
 	}
@@ -342,9 +355,12 @@ func TestOverlapPrevention(t *testing.T) {
 }
 
 type distributedMockStorage struct {
-	mu     sync.Mutex
-	tasks  map[string]*skedulr.PersistentTask
-	leases map[string]string // taskID -> instanceID
+	mu                sync.Mutex
+	tasks             map[string]*skedulr.PersistentTask
+	leases            map[string]string // taskID -> instanceID
+	cancelSubscribers []func(string)
+	waiting           map[string][]*skedulr.PersistentTask // parentID -> children
+	depCounts         map[string]int                       // childID -> remaining deps
 }
 
 func (m *distributedMockStorage) Save(ctx context.Context, t *skedulr.PersistentTask) error {
@@ -389,6 +405,47 @@ func (m *distributedMockStorage) Heartbeat(ctx context.Context, id, instanceID s
 		return context.DeadlineExceeded
 	}
 	return nil
+}
+
+func (m *distributedMockStorage) PublishCancel(ctx context.Context, id string) error {
+	m.mu.Lock()
+	subs := make([]func(string), len(m.cancelSubscribers))
+	copy(subs, m.cancelSubscribers)
+	m.mu.Unlock()
+	for _, sub := range subs {
+		sub(id)
+	}
+	return nil
+}
+func (m *distributedMockStorage) SubscribeCancel(ctx context.Context, onCancel func(id string)) error {
+	m.mu.Lock()
+	m.cancelSubscribers = append(m.cancelSubscribers, onCancel)
+	m.mu.Unlock()
+	return nil
+}
+func (m *distributedMockStorage) SaveWaiting(ctx context.Context, t *skedulr.PersistentTask) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tasks[t.ID] = t
+	m.depCounts[t.ID] = len(t.DependsOn)
+	for _, pid := range t.DependsOn {
+		m.waiting[pid] = append(m.waiting[pid], t)
+	}
+	return nil
+}
+func (m *distributedMockStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*skedulr.PersistentTask, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	children := m.waiting[parentID]
+	var ready []*skedulr.PersistentTask
+	for _, child := range children {
+		m.depCounts[child.ID]--
+		if m.depCounts[child.ID] == 0 {
+			ready = append(ready, child)
+		}
+	}
+	delete(m.waiting, parentID)
+	return ready, nil
 }
 
 func TestDistributedCoordination(t *testing.T) {
@@ -442,5 +499,123 @@ func TestDistributedCoordination(t *testing.T) {
 
 	if count != 1 {
 		t.Errorf("expected 1 execution, got %d", count)
+	}
+}
+
+func TestDistributedCancellation(t *testing.T) {
+	storage := &distributedMockStorage{
+		tasks:  make(map[string]*skedulr.PersistentTask),
+		leases: make(map[string]string),
+	}
+
+	jobName := "cancel_job"
+	var cancelled atomic.Bool
+
+	jobFunc := func(ctx context.Context) error {
+		select {
+		case <-ctx.Done():
+			cancelled.Store(true)
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+			return nil
+		}
+	}
+
+	// Instance 1
+	sch1 := skedulr.New(
+		skedulr.WithStorage(storage),
+		skedulr.WithInstanceID("inst-1"),
+		skedulr.WithJob(jobName, jobFunc),
+	)
+	defer sch1.ShutDown(context.Background())
+
+	// Instance 2
+	sch2 := skedulr.New(
+		skedulr.WithStorage(storage),
+		skedulr.WithInstanceID("inst-2"),
+		skedulr.WithJob(jobName, jobFunc),
+	)
+	defer sch2.ShutDown(context.Background())
+
+	// Submit task to sch1
+	taskID := "task-to-cancel"
+	_, err := sch1.Submit(skedulr.NewPersistentTask(jobName, nil, 10, 0).WithID(taskID))
+	if err != nil {
+		t.Fatalf("failed to submit: %v", err)
+	}
+
+	// Give it a moment to start
+	time.Sleep(200 * time.Millisecond)
+
+	// Cancel via sch2
+	err = sch2.Cancel(taskID)
+	if err != nil {
+		t.Fatalf("failed to cancel: %v", err)
+	}
+
+	// Wait for cancellation to propagate and job to stop
+	time.Sleep(500 * time.Millisecond)
+
+	if !cancelled.Load() {
+		t.Error("task was not cancelled across instances")
+	}
+}
+
+func TestTaskDependencies(t *testing.T) {
+	storage := &distributedMockStorage{
+		tasks:     make(map[string]*skedulr.PersistentTask),
+		leases:    make(map[string]string),
+		waiting:   make(map[string][]*skedulr.PersistentTask),
+		depCounts: make(map[string]int),
+	}
+
+	executions := make([]string, 0)
+	var mu sync.Mutex
+
+	jobA := "job_a"
+	jobB := "job_b"
+
+	sch := skedulr.New(
+		skedulr.WithStorage(storage),
+		skedulr.WithJob(jobA, func(ctx context.Context) error {
+			mu.Lock()
+			executions = append(executions, jobA)
+			mu.Unlock()
+			return nil
+		}),
+		skedulr.WithJob(jobB, func(ctx context.Context) error {
+			mu.Lock()
+			executions = append(executions, jobB)
+			mu.Unlock()
+			return nil
+		}),
+	)
+	defer sch.ShutDown(context.Background())
+
+	// Submit B depending on A
+	idB := "task-b"
+	idA := "task-a"
+	_, err := sch.Submit(skedulr.NewPersistentTask(jobB, nil, 10, 0).WithID(idB).DependsOn(idA))
+	if err != nil {
+		t.Fatalf("failed to submit B: %v", err)
+	}
+
+	// Submit A
+	_, err = sch.Submit(skedulr.NewPersistentTask(jobA, nil, 10, 0).WithID(idA))
+	if err != nil {
+		t.Fatalf("failed to submit A: %v", err)
+	}
+
+	// Wait for execution
+	time.Sleep(1 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(executions) != 2 {
+		t.Fatalf("expected 2 executions, got %d", len(executions))
+	}
+	if executions[0] != jobA || executions[1] != jobB {
+		t.Errorf("expected execution order [job_a, job_b], got %v", executions)
 	}
 }

@@ -128,6 +128,7 @@ type task struct {
 	status        TaskStatus
 	typeName      string
 	payload       []byte
+	dependsOn     []string
 }
 
 // New creates and starts a new Scheduler with the provided options.
@@ -158,6 +159,14 @@ func New(opts ...Option) *Scheduler {
 
 	s.wg.Add(1)
 	go s.cleanupLoop()
+
+	s.storage.SubscribeCancel(context.Background(), func(id string) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if t, ok := s.tasks[id]; ok && t.cancel != nil {
+			t.cancel()
+		}
+	})
 
 	s.spawnWorkers(s.maxWorkers)
 
@@ -319,6 +328,12 @@ func (s *Scheduler) runTask(t task) {
 	}
 	defer cancel()
 
+	s.mu.Lock()
+	if trackTask, ok := s.tasks[t.id]; ok {
+		trackTask.cancel = cancel
+	}
+	s.mu.Unlock()
+
 	// Distributed heartbeat
 	if t.typeName != "" {
 		hbCtx, hbCancel := context.WithCancel(context.Background())
@@ -379,6 +394,26 @@ func (s *Scheduler) runTask(t task) {
 		} else {
 			if t.typeName != "" {
 				s.storage.Delete(context.Background(), t.id)
+				// Resolve dependencies
+				readyTasks, _ := s.storage.ResolveDependencies(context.Background(), t.id)
+				for _, rt := range readyTasks {
+					job, ok := s.getJob(rt.TypeName)
+					if ok {
+						jt := &task{
+							id:        rt.ID,
+							key:       rt.Key,
+							typeName:  rt.TypeName,
+							payload:   rt.Payload,
+							priority:  rt.Priority,
+							timeout:   rt.Timeout,
+							attempts:  rt.Attempts,
+							job:       job,
+							status:    StatusQueued,
+							dependsOn: nil, // Clear dependencies
+						}
+						s.Submit(jt)
+					}
+				}
 			}
 			atomic.AddInt64(&s.successCount, 1)
 		}
@@ -525,14 +560,24 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 	// Persist if it's a named job
 	if t.typeName != "" {
 		pt := &PersistentTask{
-			ID:       t.id,
-			Key:      t.key,
-			TypeName: t.typeName,
-			Payload:  t.payload,
-			Priority: t.priority,
-			Timeout:  t.timeout,
-			Attempts: t.attempts,
+			ID:        t.id,
+			Key:       t.key,
+			TypeName:  t.typeName,
+			Payload:   t.payload,
+			Priority:  t.priority,
+			Timeout:   t.timeout,
+			Attempts:  t.attempts,
+			DependsOn: t.dependsOn,
 		}
+
+		if len(t.dependsOn) > 0 {
+			if err := s.storage.SaveWaiting(context.Background(), pt); err != nil {
+				return "", fmt.Errorf("failed to save waiting task: %w", err)
+			}
+			s.tasks[t.id] = t
+			return t.id, nil
+		}
+
 		if err := s.storage.Save(context.Background(), pt); err != nil {
 			return "", fmt.Errorf("failed to persist task: %w", err)
 		}
@@ -558,6 +603,12 @@ func (t *task) WithKey(key string) *task {
 // WithID sets a custom ID for the task.
 func (t *task) WithID(id string) *task {
 	t.id = id
+	return t
+}
+
+// DependsOn specifies task IDs that this task must wait for.
+func (t *task) DependsOn(ids ...string) *task {
+	t.dependsOn = ids
 	return t
 }
 
@@ -640,21 +691,19 @@ func (s *Scheduler) ScheduleRecurring(job Job, interval time.Duration, priority 
 	return id, nil
 }
 
-// Cancel cancels a scheduled or recurring task by its ID.
 func (s *Scheduler) Cancel(id string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	t, ok := s.tasks[id]
-	if !ok {
-		return fmt.Errorf("task not found: %s", id)
+	if ok {
+		if t.cancel != nil {
+			t.cancel()
+		}
+		delete(s.tasks, id)
 	}
+	s.mu.Unlock()
 
-	if t.cancel != nil {
-		t.cancel()
-	}
-	delete(s.tasks, id)
-	return nil
+	// Global cancel via storage
+	return s.storage.PublishCancel(context.Background(), id)
 }
 
 // ShutDown gracefully stops the scheduler, waiting for active workers to finish
@@ -695,4 +744,11 @@ func (s *Scheduler) ShutDown(ctx context.Context) error {
 	}
 	close(s.jobQueue)
 	return nil
+}
+
+func (s *Scheduler) getJob(typeName string) (Job, bool) {
+	s.regMu.RLock()
+	defer s.regMu.RUnlock()
+	j, ok := s.registry[typeName]
+	return j, ok
 }

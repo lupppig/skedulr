@@ -19,6 +19,7 @@ type PersistentTask struct {
 	Timeout       time.Duration `json:"timeout"`
 	Attempts      int           `json:"attempts"`
 	RetryStrategy string        `json:"retry_strategy,omitempty"`
+	DependsOn     []string      `json:"depends_on,omitempty"`
 }
 
 // Storage defines the interface for persisting tasks.
@@ -28,6 +29,10 @@ type Storage interface {
 	LoadAll(ctx context.Context) ([]*PersistentTask, error)
 	Claim(ctx context.Context, id string, instanceID string, duration time.Duration) (bool, error)
 	Heartbeat(ctx context.Context, id string, instanceID string, duration time.Duration) error
+	PublishCancel(ctx context.Context, id string) error
+	SubscribeCancel(ctx context.Context, onCancel func(id string)) error
+	SaveWaiting(ctx context.Context, t *PersistentTask) error
+	ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error)
 }
 
 // InMemoryStorage is a no-op storage implementation used as a fallback.
@@ -41,6 +46,14 @@ func (s *InMemoryStorage) Claim(ctx context.Context, id, instanceID string, d ti
 }
 func (s *InMemoryStorage) Heartbeat(ctx context.Context, id, instanceID string, d time.Duration) error {
 	return nil
+}
+func (s *InMemoryStorage) PublishCancel(ctx context.Context, id string) error { return nil }
+func (s *InMemoryStorage) SubscribeCancel(ctx context.Context, onCancel func(id string)) error {
+	return nil
+}
+func (s *InMemoryStorage) SaveWaiting(ctx context.Context, t *PersistentTask) error { return nil }
+func (s *InMemoryStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error) {
+	return nil, nil
 }
 
 // RedisStorage implements Storage using Redis.
@@ -87,7 +100,7 @@ func (s *RedisStorage) LoadAll(ctx context.Context) ([]*PersistentTask, error) {
 	for _, key := range keys {
 		data, err := s.client.Get(ctx, key).Bytes()
 		if err != nil {
-			continue // Skip failed reads? Or return error?
+			continue
 		}
 		var t PersistentTask
 		if err := json.Unmarshal(data, &t); err != nil {
@@ -118,4 +131,86 @@ func (s *RedisStorage) Heartbeat(ctx context.Context, id, instanceID string, d t
 		return fmt.Errorf("lease for %s lost (owned by %s)", id, val)
 	}
 	return s.client.Expire(ctx, leaseKey, d).Err()
+}
+
+func (s *RedisStorage) SaveWaiting(ctx context.Context, t *PersistentTask) error {
+	// 1. Save the task itself
+	data, err := json.Marshal(t)
+	if err != nil {
+		return err
+	}
+	s.client.Set(ctx, s.prefix+t.ID, data, 0)
+
+	// 2. Map parents -> children
+	for _, parentID := range t.DependsOn {
+		s.client.SAdd(ctx, s.prefix+parentID+":children", t.ID)
+	}
+	// 3. Mark task as waiting (track remaining deps count)
+	s.client.Set(ctx, s.prefix+t.ID+":deps_count", len(t.DependsOn), 0)
+	return nil
+}
+
+func (s *RedisStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error) {
+	// 1. Get all children waiting for this parent
+	childIDs, err := s.client.SInter(ctx, s.prefix+parentID+":children").Result()
+	if err != nil && err != redis.Nil {
+		// Wait, SInter is for intersection. I just want the members.
+	}
+	childIDs, err = s.client.SMembers(ctx, s.prefix+parentID+":children").Result()
+	if err != nil {
+		return nil, err
+	}
+
+	var readyTasks []*PersistentTask
+	for _, childID := range childIDs {
+		// Decrement dependency count
+		rem, err := s.client.Decr(ctx, s.prefix+childID+":deps_count").Result()
+		if err != nil {
+			continue
+		}
+		if rem == 0 {
+			// All dependencies met!
+			data, err := s.client.Get(ctx, s.prefix+childID).Bytes()
+			if err != nil {
+				continue
+			}
+			var t PersistentTask
+			if err := json.Unmarshal(data, &t); err == nil {
+				readyTasks = append(readyTasks, &t)
+				// Clean up
+				s.client.Del(ctx, s.prefix+childID+":deps_count")
+			}
+		}
+	}
+	// Clean up the children set for this parent
+	s.client.Del(ctx, s.prefix+parentID+":children")
+
+	return readyTasks, nil
+}
+
+func (s *RedisStorage) PublishCancel(ctx context.Context, id string) error {
+	channel := s.prefix + "cmd:cancel"
+	return s.client.Publish(ctx, channel, id).Err()
+}
+
+func (s *RedisStorage) SubscribeCancel(ctx context.Context, onCancel func(id string)) error {
+	channel := s.prefix + "cmd:cancel"
+	pubsub := s.client.Subscribe(ctx, channel)
+
+	go func() {
+		defer pubsub.Close()
+		ch := pubsub.Channel()
+		for {
+			select {
+			case msg, ok := <-ch:
+				if !ok {
+					return
+				}
+				onCancel(msg.Payload)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return nil
 }
