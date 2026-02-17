@@ -26,6 +26,8 @@ type Storage interface {
 	Save(ctx context.Context, t *PersistentTask) error
 	Delete(ctx context.Context, id string) error
 	LoadAll(ctx context.Context) ([]*PersistentTask, error)
+	Claim(ctx context.Context, id string, instanceID string, duration time.Duration) (bool, error)
+	Heartbeat(ctx context.Context, id string, instanceID string, duration time.Duration) error
 }
 
 // InMemoryStorage is a no-op storage implementation used as a fallback.
@@ -34,6 +36,12 @@ type InMemoryStorage struct{}
 func (s *InMemoryStorage) Save(ctx context.Context, t *PersistentTask) error      { return nil }
 func (s *InMemoryStorage) Delete(ctx context.Context, id string) error            { return nil }
 func (s *InMemoryStorage) LoadAll(ctx context.Context) ([]*PersistentTask, error) { return nil, nil }
+func (s *InMemoryStorage) Claim(ctx context.Context, id, instanceID string, d time.Duration) (bool, error) {
+	return true, nil
+}
+func (s *InMemoryStorage) Heartbeat(ctx context.Context, id, instanceID string, d time.Duration) error {
+	return nil
+}
 
 // RedisStorage implements Storage using Redis.
 type RedisStorage struct {
@@ -88,4 +96,26 @@ func (s *RedisStorage) LoadAll(ctx context.Context) ([]*PersistentTask, error) {
 		tasks = append(tasks, &t)
 	}
 	return tasks, nil
+}
+
+func (s *RedisStorage) Claim(ctx context.Context, id, instanceID string, d time.Duration) (bool, error) {
+	leaseKey := s.prefix + id + ":lease"
+	ok, err := s.client.SetNX(ctx, leaseKey, instanceID, d).Result()
+	if err != nil {
+		return false, fmt.Errorf("failed to claim task %s: %w", id, err)
+	}
+	return ok, nil
+}
+
+func (s *RedisStorage) Heartbeat(ctx context.Context, id, instanceID string, d time.Duration) error {
+	leaseKey := s.prefix + id + ":lease"
+	// Only update if we still own it
+	val, err := s.client.Get(ctx, leaseKey).Result()
+	if err != nil {
+		return fmt.Errorf("failed to check lease for %s: %w", id, err)
+	}
+	if val != instanceID {
+		return fmt.Errorf("lease for %s lost (owned by %s)", id, val)
+	}
+	return s.client.Expire(ctx, leaseKey, d).Err()
 }

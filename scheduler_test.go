@@ -2,6 +2,7 @@ package skedulr_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -235,21 +236,22 @@ func TestPriorityTaskExecutionOrder(t *testing.T) {
 	executionOrder := make([]int, 0)
 	var mu sync.Mutex
 
+	// Submit a blocker task to ensure subsequent tasks queue up
+	blockerDone := make(chan bool)
+	_, _ = sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		time.Sleep(500 * time.Millisecond)
+		blockerDone <- true
+		return nil
+	}, 100, 0))
+
 	// Submit tasks with different priorities in a "random" order
 	priorities := []int{1, 10, 5, 20, 2}
-
-	// We need to ensure the tasks stay in the queue long enough for the heap to sort them,
-	// because the worker might grab the first one immediately.
-	// However, with our current scaling/dequeue logic, the simplest way is to submit them all.
-	// To reliably test priority, we'll submit 100 tasks and check if the order is generally decreasing.
-
 	for _, p := range priorities {
 		priority := p
 		_, err := sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
 			mu.Lock()
 			executionOrder = append(executionOrder, priority)
 			mu.Unlock()
-			time.Sleep(50 * time.Millisecond)
 			return nil
 		}, priority, 0))
 		if err != nil {
@@ -257,8 +259,9 @@ func TestPriorityTaskExecutionOrder(t *testing.T) {
 		}
 	}
 
+	<-blockerDone
 	// Wait for all to finish
-	time.Sleep(1 * time.Second)
+	time.Sleep(500 * time.Millisecond)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -272,5 +275,172 @@ func TestPriorityTaskExecutionOrder(t *testing.T) {
 		if executionOrder[i] != expected[i] {
 			t.Errorf("at index %d: expected priority %d, got %d", i, expected[i], executionOrder[i])
 		}
+	}
+}
+
+func TestBackpressure(t *testing.T) {
+	// Set a very small capacity
+	sch := skedulr.New(skedulr.WithMaxCapacity(2))
+	defer sch.ShutDown(context.Background())
+
+	job := func(ctx context.Context) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	}
+
+	// Fill the queue (2 tasks)
+	_, err := sch.Submit(skedulr.NewTask(job, 10, 0))
+	if err != nil {
+		t.Fatalf("first submit failed: %v", err)
+	}
+	_, err = sch.Submit(skedulr.NewTask(job, 10, 0))
+	if err != nil {
+		t.Fatalf("second submit failed: %v", err)
+	}
+
+	// Third task should be rejected
+	_, err = sch.Submit(skedulr.NewTask(job, 10, 0))
+	if !errors.Is(err, skedulr.ErrQueueFull) {
+		t.Errorf("expected ErrQueueFull, got %v", err)
+	}
+}
+
+func TestOverlapPrevention(t *testing.T) {
+	sch := skedulr.New(skedulr.WithMaxWorkers(1))
+	defer sch.ShutDown(context.Background())
+
+	jobDone := make(chan bool)
+	job := func(ctx context.Context) error {
+		time.Sleep(200 * time.Millisecond)
+		jobDone <- true
+		return nil
+	}
+
+	key := "singleton-job"
+
+	// Submit first job with key
+	_, err := sch.Submit(skedulr.NewTask(job, 10, 0).WithKey(key))
+	if err != nil {
+		t.Fatalf("failed to submit first job: %v", err)
+	}
+
+	// Submit second job with same key immediately
+	_, err = sch.Submit(skedulr.NewTask(job, 10, 0).WithKey(key))
+	if !errors.Is(err, skedulr.ErrJobAlreadyRunning) {
+		t.Errorf("expected ErrJobAlreadyRunning, got %v", err)
+	}
+
+	// Wait for job to finish
+	<-jobDone
+	time.Sleep(100 * time.Millisecond) // Allow key cleanup
+
+	// Now we should be able to submit it again
+	_, err = sch.Submit(skedulr.NewTask(job, 10, 0).WithKey(key))
+	if err != nil {
+		t.Errorf("failed to submit job after cleanup: %v", err)
+	}
+}
+
+type distributedMockStorage struct {
+	mu     sync.Mutex
+	tasks  map[string]*skedulr.PersistentTask
+	leases map[string]string // taskID -> instanceID
+}
+
+func (m *distributedMockStorage) Save(ctx context.Context, t *skedulr.PersistentTask) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tasks[t.ID] = t
+	return nil
+}
+
+func (m *distributedMockStorage) Delete(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.tasks, id)
+	delete(m.leases, id)
+	return nil
+}
+
+func (m *distributedMockStorage) LoadAll(ctx context.Context) ([]*skedulr.PersistentTask, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	list := make([]*skedulr.PersistentTask, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		list = append(list, t)
+	}
+	return list, nil
+}
+
+func (m *distributedMockStorage) Claim(ctx context.Context, id, instanceID string, d time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if owner, ok := m.leases[id]; ok && owner != instanceID {
+		return false, nil
+	}
+	m.leases[id] = instanceID
+	return true, nil
+}
+
+func (m *distributedMockStorage) Heartbeat(ctx context.Context, id, instanceID string, d time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if owner, ok := m.leases[id]; !ok || owner != instanceID {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func TestDistributedCoordination(t *testing.T) {
+	storage := &distributedMockStorage{
+		tasks:  make(map[string]*skedulr.PersistentTask),
+		leases: make(map[string]string),
+	}
+
+	executions := sync.Map{}
+	jobName := "dist_job"
+
+	jobFunc := func(ctx context.Context) error {
+		id := skedulr.TaskID(ctx)
+		executions.Store(id, true)
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	}
+
+	// Instance 1
+	sch1 := skedulr.New(
+		skedulr.WithStorage(storage),
+		skedulr.WithInstanceID("inst-1"),
+		skedulr.WithJob(jobName, jobFunc),
+	)
+	defer sch1.ShutDown(context.Background())
+
+	// Instance 2
+	sch2 := skedulr.New(
+		skedulr.WithStorage(storage),
+		skedulr.WithInstanceID("inst-2"),
+		skedulr.WithJob(jobName, jobFunc),
+	)
+	defer sch2.ShutDown(context.Background())
+
+	// Submit a task to sch1
+	taskID := "task-1"
+	_, err := sch1.Submit(skedulr.NewPersistentTask(jobName, nil, 10, 0).WithID(taskID))
+	if err != nil {
+		t.Fatalf("failed to submit: %v", err)
+	}
+
+	// Wait for execution
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify it was executed exactly once
+	count := 0
+	executions.Range(func(key, value interface{}) bool {
+		count++
+		return true
+	})
+
+	if count != 1 {
+		t.Errorf("expected 1 execution, got %d", count)
 	}
 }

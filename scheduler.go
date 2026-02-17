@@ -81,6 +81,8 @@ type Scheduler struct {
 	wg             sync.WaitGroup
 	maxQueueSize   int
 	activeKeys     map[string]struct{}
+	instanceID     string
+	leaseDuration  time.Duration
 }
 
 // SchedulerStats provides a snapshot of the scheduler's current state.
@@ -131,15 +133,17 @@ type task struct {
 // New creates and starts a new Scheduler with the provided options.
 func New(opts ...Option) *Scheduler {
 	s := &Scheduler{
-		tasks:        make(map[string]*task),
-		jobQueue:     make(chan task),
-		queue:        make(taskQueue, 0),
-		stop:         make(chan struct{}),
-		maxWorkers:   5,
-		maxQueueSize: 1000,
-		registry:     make(map[string]Job),
-		storage:      &InMemoryStorage{},
-		activeKeys:   make(map[string]struct{}),
+		tasks:         make(map[string]*task),
+		jobQueue:      make(chan task),
+		queue:         make(taskQueue, 0),
+		stop:          make(chan struct{}),
+		maxWorkers:    5,
+		maxQueueSize:  1000,
+		registry:      make(map[string]Job),
+		storage:       &InMemoryStorage{},
+		activeKeys:    make(map[string]struct{}),
+		instanceID:    generateId(),
+		leaseDuration: 30 * time.Second, // Default lease
 	}
 	s.cond = sync.NewCond(&s.mu)
 
@@ -151,6 +155,9 @@ func New(opts ...Option) *Scheduler {
 
 	s.wg.Add(1)
 	go s.dequeueLoop()
+
+	s.wg.Add(1)
+	go s.cleanupLoop()
 
 	s.spawnWorkers(s.maxWorkers)
 
@@ -175,6 +182,12 @@ func (s *Scheduler) loadTasks() {
 	}
 
 	for _, pt := range tasks {
+		// Try to claim the task
+		claimed, err := s.storage.Claim(context.Background(), pt.ID, s.instanceID, s.leaseDuration)
+		if err != nil || !claimed {
+			continue // Already claimed by another instance or error
+		}
+
 		s.regMu.RLock()
 		job, ok := s.registry[pt.TypeName]
 		s.regMu.RUnlock()
@@ -228,6 +241,21 @@ func (s *Scheduler) dequeueLoop() {
 			} else {
 				s.mu.Unlock()
 			}
+		}
+	}
+}
+
+func (s *Scheduler) cleanupLoop() {
+	defer s.wg.Done()
+	ticker := time.NewTicker(s.leaseDuration / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.loadTasks()
+		case <-s.stop:
+			return
 		}
 	}
 }
@@ -290,6 +318,31 @@ func (s *Scheduler) runTask(t task) {
 		ctx, cancel = context.WithCancel(baseCtx)
 	}
 	defer cancel()
+
+	// Distributed heartbeat
+	if t.typeName != "" {
+		hbCtx, hbCancel := context.WithCancel(context.Background())
+		defer hbCancel()
+		go func() {
+			ticker := time.NewTicker(s.leaseDuration / 3)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if err := s.storage.Heartbeat(hbCtx, t.id, s.instanceID, s.leaseDuration); err != nil {
+						if s.logger != nil {
+							s.logger.Error("failed lease heartbeat", err, "task_id", t.id, "instance_id", s.instanceID)
+						}
+						return // Stop heartbeat if we lost the lease
+					}
+				case <-hbCtx.Done():
+					return
+				case <-s.stop:
+					return
+				}
+			}
+		}()
+	}
 
 	// Apply middlewares
 	finalJob := t.job
@@ -483,6 +536,10 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 		if err := s.storage.Save(context.Background(), pt); err != nil {
 			return "", fmt.Errorf("failed to persist task: %w", err)
 		}
+		// Claim immediately
+		if _, err := s.storage.Claim(context.Background(), t.id, s.instanceID, s.leaseDuration); err != nil {
+			return "", fmt.Errorf("failed to claim task on submission: %w", err)
+		}
 	}
 
 	s.tasks[t.id] = t
@@ -495,6 +552,12 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 // WithKey sets a unique key for the task to prevent overlapping executions.
 func (t *task) WithKey(key string) *task {
 	t.key = key
+	return t
+}
+
+// WithID sets a custom ID for the task.
+func (t *task) WithID(id string) *task {
+	t.id = id
 	return t
 }
 

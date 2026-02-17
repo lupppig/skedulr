@@ -84,3 +84,21 @@ func WithMaxCapacity(n int) Option {
 		}
 	}
 }
+
+// WithInstanceID sets a custom unique ID for the scheduler instance.
+func WithInstanceID(id string) Option {
+	return func(s *Scheduler) {
+		if id != "" {
+			s.instanceID = id
+		}
+	}
+}
+
+// WithLeaseDuration sets the duration for task visibility leases in a distributed environment.
+func WithLeaseDuration(d time.Duration) Option {
+	return func(s *Scheduler) {
+		if d > 0 {
+			s.leaseDuration = d
+		}
+	}
+}
