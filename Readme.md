@@ -8,18 +8,19 @@ Skedulr is a high-performance, concurrent task scheduler for Go, designed for pr
 
 ## Features
 
+- **Web Dashboard**: Integrated real-time monitoring and management interface.
 - **Distributed Coordination**: Multi-instance safety using Redis-based "Claims" and "Leases".
 - **Task Dependencies**: Powerful `DependsOn` mechanism for complex execution chains.
 - **Global Cancellation**: Cluster-wide `Cancel(id)` via Redis Pub/Sub.
-- **Backpressure & Bounding**: Enforceable queue limits and unique task keys to prevent overlaps.
-- **Priority Queuing**: Jobs are executed based on user-defined priority levels.
+- **Backtracking & Backpressure**: Enforceable queue limits and unique task keys.
 - **Smart Retries**: Exponential backoff with random jitter to prevent "thundering herds".
 - **Zero-Idle CPU**: Internal condition variables for instant reaction times with zero polling.
 
 ## Installation
 
 ```bash
-go get github.com/lupppig/skedulr
+# Update to the latest version with Dashboard support
+go get github.com/lupppig/skedulr@v1.0.3
 ```
 
 ## Quick Start
@@ -112,6 +113,21 @@ parentID, _ := s.Submit(skedulr.NewPersistentTask("job_a", nil, 10, 0))
 s.Submit(skedulr.NewPersistentTask("job_b", nil, 5, 0).DependsOn(parentID))
 ```
 
+### Web Dashboard
+Skedulr includes a premium, real-time updated dashboard with zero external dependencies. The UI is embedded directly into your binary.
+
+```go
+import "net/http"
+
+// Mount the dashboard anywhere in your router
+http.Handle("/skedulr/", http.StripPrefix("/skedulr", s.DashboardHandler()))
+http.ListenAndServe(":8080", nil)
+```
+
+- **Live Stats**: Real-time polling of queue size, success/failure counts, and active worker count.
+- **Task Management**: View all active tasks across the cluster.
+- **Integrated Cancellation**: Cancel any running task directly from the UI.
+
 ### Throughput & Concurrency Controls
 Prevent memory exhaustion and overlapping tasks.
 ```go
@@ -136,11 +152,14 @@ skedulr.WithRetryStrategy(&skedulr.ExponentialBackoff{
 ## Monitoring
 Query the state of any task or the scheduler itself:
 ```go
-// Get overall stats
-stats := s.Stats() // SuccessCount, FailureCount, QueueSize
+// Get overall stats (JSON serializable)
+stats := s.Stats() 
+fmt.Printf("Queue: %d, Success: %d\n", stats.QueueSize, stats.SuccessCount)
 
-// Get specific task status
-status := s.Status(taskID) // Succeeded, Failed, Running, Queued
+// Get active task info
+for _, task := range stats.ActiveTasks {
+    fmt.Printf("ID: %s, Status: %s\n", task.ID, task.Status)
+}
 ```
 
 ## License
