@@ -2,8 +2,12 @@ package skedulr_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -617,5 +621,35 @@ func TestTaskDependencies(t *testing.T) {
 	}
 	if executions[0] != jobA || executions[1] != jobB {
 		t.Errorf("expected execution order [job_a, job_b], got %v", executions)
+	}
+}
+
+func TestDashboard(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	handler := sch.DashboardHandler()
+
+	// Test UI
+	reqUI, _ := http.NewRequest("GET", "/", nil)
+	rrUI := httptest.NewRecorder()
+	handler.ServeHTTP(rrUI, reqUI)
+	if rrUI.Code != http.StatusOK {
+		t.Errorf("expected UI status 200, got %d", rrUI.Code)
+	}
+	if !strings.Contains(rrUI.Body.String(), "Skedulr Dashboard") {
+		t.Error("UI body missing 'Skedulr Dashboard'")
+	}
+
+	// Test Stats API
+	reqStats, _ := http.NewRequest("GET", "/api/stats", nil)
+	rrStats := httptest.NewRecorder()
+	handler.ServeHTTP(rrStats, reqStats)
+	if rrStats.Code != http.StatusOK {
+		t.Errorf("expected stats status 200, got %d", rrStats.Code)
+	}
+	var s skedulr.Stats
+	if err := json.Unmarshal(rrStats.Body.Bytes(), &s); err != nil {
+		t.Fatalf("failed to decode stats: %v", err)
 	}
 }

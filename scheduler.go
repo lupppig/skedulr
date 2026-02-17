@@ -85,15 +85,6 @@ type Scheduler struct {
 	leaseDuration  time.Duration
 }
 
-// SchedulerStats provides a snapshot of the scheduler's current state.
-type SchedulerStats struct {
-	QueueSize      int64
-	SuccessCount   int64
-	FailureCount   int64
-	PanicCount     int64
-	CurrentWorkers int32
-}
-
 // TaskStatus represents the current state of a task.
 type TaskStatus int
 
@@ -471,17 +462,6 @@ func (s *Scheduler) handleFailure(t task, err error) {
 				s.Submit(retryTask)
 			})
 		}
-	}
-}
-
-// Stats returns a snapshot of the scheduler's statistics.
-func (s *Scheduler) Stats() SchedulerStats {
-	return SchedulerStats{
-		QueueSize:      atomic.LoadInt64(&s.queueSize),
-		SuccessCount:   atomic.LoadInt64(&s.successCount),
-		FailureCount:   atomic.LoadInt64(&s.failureCount),
-		PanicCount:     atomic.LoadInt64(&s.panicCount),
-		CurrentWorkers: atomic.LoadInt32(&s.currentWorkers),
 	}
 }
 
