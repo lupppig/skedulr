@@ -9,7 +9,7 @@ import (
 
 func BenchmarkScheduleAndRun(b *testing.B) {
 	s := skedulr.New(skedulr.WithMaxWorkers(100))
-	defer s.ShutDown()
+	defer s.ShutDown(context.Background())
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -21,7 +21,7 @@ func BenchmarkScheduleAndRun(b *testing.B) {
 
 func BenchmarkMultipleWorkers(b *testing.B) {
 	s := skedulr.New(skedulr.WithMaxWorkers(1000), skedulr.WithInitialWorkers(100))
-	defer s.ShutDown()
+	defer s.ShutDown(context.Background())
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {

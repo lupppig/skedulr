@@ -12,14 +12,19 @@ type RetryStrategy interface {
 	NextDelay(attempt int) (time.Duration, bool)
 }
 
-// ExponentialBackoff implements a retry strategy with exponential backoff.
+// ExponentialBackoff implements a retry strategy with exponential backoff and jitter.
 type ExponentialBackoff struct {
+	// MaxAttempts is the maximum number of retries.
 	MaxAttempts int
-	BaseDelay   time.Duration
-	MaxDelay    time.Duration
-	Jitter      float64 // Jitter factor (0-1), e.g., 0.1 for 10% jitter
+	// BaseDelay is the delay for the first retry.
+	BaseDelay time.Duration
+	// MaxDelay is the upper bound for any retry delay.
+	MaxDelay time.Duration
+	// Jitter is a factor (0-1) to randomize the delay.
+	Jitter float64 // Jitter factor (0-1), e.g., 0.1 for 10% jitter
 }
 
+// NextDelay calculates the next retry interval.
 func (e *ExponentialBackoff) NextDelay(attempt int) (time.Duration, bool) {
 	if attempt >= e.MaxAttempts {
 		return 0, false

@@ -3,10 +3,16 @@ package skedulr
 import (
 	"container/heap"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+var (
+	// ErrSchedulerStopped is returned when an operation is attempted on a stopped scheduler.
+	ErrSchedulerStopped = errors.New("scheduler is stopped")
 )
 
 type taskQueue []*task
@@ -45,6 +51,8 @@ func (tsk taskQueue) Swap(i, j int) {
 // Job defines the function signature for a task.
 type Job func(ctx context.Context) error
 
+// Scheduler manages the concurrent execution of prioritized tasks.
+// It supports dynamic worker scaling, retries, and middleware.
 type Scheduler struct {
 	mu             sync.Mutex
 	cond           *sync.Cond
@@ -52,6 +60,7 @@ type Scheduler struct {
 	tasks          map[string]*task
 	jobQueue       chan task
 	stop           chan struct{}
+	stopped        int32 // Atomic flag to prevent new submissions
 	maxWorkers     int
 	currentWorkers int32
 	queueSize      int64 // Atomic tracker for queue size
@@ -66,7 +75,6 @@ type Scheduler struct {
 }
 
 // SchedulerStats provides a snapshot of the scheduler's current state.
-// SchedulerStats provides a snapshot of the scheduler's current state.
 type SchedulerStats struct {
 	QueueSize      int64
 	SuccessCount   int64
@@ -79,11 +87,17 @@ type SchedulerStats struct {
 type TaskStatus int
 
 const (
+	// StatusUnknown indicates the task state is unknown or finished.
 	StatusUnknown TaskStatus = iota
+	// StatusQueued indicates the task is in the priority queue waiting for a worker.
 	StatusQueued
+	// StatusRunning indicates the task is currently being executed.
 	StatusRunning
+	// StatusSucceeded indicates the task finished successfully.
 	StatusSucceeded
+	// StatusFailed indicates the task failed after all retry attempts.
 	StatusFailed
+	// StatusCancelled indicates the task was manually cancelled.
 	StatusCancelled
 )
 
@@ -102,7 +116,7 @@ type task struct {
 	status        TaskStatus
 }
 
-// New creates a new Scheduler with the provided options.
+// New creates and starts a new Scheduler with the provided options.
 func New(opts ...Option) *Scheduler {
 	s := &Scheduler{
 		tasks:      make(map[string]*task),
@@ -110,7 +124,6 @@ func New(opts ...Option) *Scheduler {
 		queue:      make(taskQueue, 0),
 		stop:       make(chan struct{}),
 		maxWorkers: 10, // Default max workers
-		logger:     noopLogger{},
 	}
 	s.cond = sync.NewCond(&s.mu)
 
@@ -264,7 +277,9 @@ func (s *Scheduler) runTask(t task) {
 		if err != nil {
 			t.status = StatusFailed
 			s.mu.Unlock()
-			s.logger.Error("task failed", err, "task_id", t.id)
+			if s.logger != nil {
+				s.logger.Error("task failed", err, "task_id", t.id)
+			}
 			s.handleFailure(t, err)
 		} else {
 			t.status = StatusSucceeded
@@ -275,7 +290,9 @@ func (s *Scheduler) runTask(t task) {
 		s.mu.Lock()
 		t.status = StatusFailed
 		s.mu.Unlock()
-		s.logger.Error("task context cancelled or timed out", ctx.Err(), "task_id", t.id)
+		if s.logger != nil {
+			s.logger.Error("task context cancelled or timed out", ctx.Err(), "task_id", t.id)
+		}
 		s.handleFailure(t, ctx.Err())
 	}
 
@@ -342,7 +359,12 @@ func NewTask(job Job, priority int, timeout time.Duration) *task {
 }
 
 // Submit adds a task to the priority queue.
-func (s *Scheduler) Submit(t *task) string {
+// Returns an error if the scheduler is stopped.
+func (s *Scheduler) Submit(t *task) (string, error) {
+	if atomic.LoadInt32(&s.stopped) == 1 {
+		return "", ErrSchedulerStopped
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -355,11 +377,15 @@ func (s *Scheduler) Submit(t *task) string {
 	heap.Push(&s.queue, t)
 	atomic.AddInt64(&s.queueSize, 1)
 	s.cond.Signal()
-	return t.id
+	return t.id, nil
 }
 
 // ScheduleOnce schedules a job to run at a specific time.
 func (s *Scheduler) ScheduleOnce(job Job, at time.Time, priority int) (string, error) {
+	if atomic.LoadInt32(&s.stopped) == 1 {
+		return "", ErrSchedulerStopped
+	}
+
 	id := generateId()
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -394,6 +420,10 @@ func (s *Scheduler) ScheduleOnce(job Job, at time.Time, priority int) (string, e
 
 // ScheduleRecurring schedules a job to run at fixed intervals.
 func (s *Scheduler) ScheduleRecurring(job Job, interval time.Duration, priority int) (string, error) {
+	if atomic.LoadInt32(&s.stopped) == 1 {
+		return "", ErrSchedulerStopped
+	}
+
 	id := generateId()
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -429,7 +459,7 @@ func (s *Scheduler) ScheduleRecurring(job Job, interval time.Duration, priority 
 	return id, nil
 }
 
-// Cancel cancels a scheduled or recurring task.
+// Cancel cancels a scheduled or recurring task by its ID.
 func (s *Scheduler) Cancel(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -446,14 +476,33 @@ func (s *Scheduler) Cancel(id string) error {
 	return nil
 }
 
-// ShutDown gracefully stops the scheduler, waiting for active workers to finish.
-func (s *Scheduler) ShutDown() error {
+// ShutDown gracefully stops the scheduler, waiting for active workers to finish
+// or the context to expire.
+func (s *Scheduler) ShutDown(ctx context.Context) error {
+	if !atomic.CompareAndSwapInt32(&s.stopped, 0, 1) {
+		return nil // Already stopped
+	}
+
 	s.mu.Lock()
 	close(s.stop)
 	s.cond.Broadcast()
 	s.mu.Unlock()
 
-	s.wg.Wait()
+	// Wait for workers or timeout
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Clean up
+	case <-ctx.Done():
+		if s.logger != nil {
+			s.logger.Error("shutdown timeout exceeded", ctx.Err())
+		}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

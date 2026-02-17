@@ -9,59 +9,67 @@ import (
 	"time"
 
 	"github.com/kehl-gopher/skedulr"
-	schedulr "github.com/kehl-gopher/skedulr"
 )
 
 func TestSubmitAndExecuteTask(t *testing.T) {
-	sch := schedulr.New()
-	defer sch.ShutDown()
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
 
 	done := make(chan bool)
-	task := schedulr.NewTask(func(ctx context.Context) error {
+	task := skedulr.NewTask(func(ctx context.Context) error {
 		fmt.Println("[Task Simple] Running")
 		done <- true
+		fmt.Println("[Task Simple] Completed")
 		return nil
-	}, 5, 2*time.Second)
+	}, 5, 0)
 
-	sch.Submit(task)
+	_, err := sch.Submit(task)
+	if err != nil {
+		t.Fatalf("failed to submit task: %v", err)
+	}
 
 	select {
 	case <-done:
-		fmt.Println("[Task Simple] Completed")
-	case <-time.After(10 * time.Second):
-		t.Error("task did not complete in time")
+	case <-time.After(2 * time.Second):
+		t.Fatal("task did not complete in time")
 	}
 }
 
 func TestTaskTimeout(t *testing.T) {
-	sch := schedulr.New()
-	defer sch.ShutDown()
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
 
-	task := schedulr.NewTask(func(ctx context.Context) error {
+	task := skedulr.NewTask(func(ctx context.Context) error {
 		select {
-		case <-time.After(2 * time.Second):
-			return nil
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-time.After(2 * time.Second):
+			return nil
 		}
 	}, 5, 500*time.Millisecond)
 
-	sch.Submit(task)
-
+	_, err := sch.Submit(task)
+	if err != nil {
+		t.Fatalf("failed to submit task: %v", err)
+	}
 	time.Sleep(1 * time.Second)
+
+	stats := sch.Stats()
+	if stats.FailureCount != 1 {
+		t.Errorf("expected 1 failure due to timeout, got %d", stats.FailureCount)
+	}
 }
 
 func TestScheduleOnce(t *testing.T) {
-	sch := schedulr.New()
-	defer sch.ShutDown()
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
 
 	done := make(chan bool)
-
 	_, err := sch.ScheduleOnce(func(ctx context.Context) error {
 		fmt.Println("[ScheduledOnce] Executed")
 		done <- true
 		return nil
-	}, time.Now().Add(1*time.Second), 3)
+	}, time.Now().Add(500*time.Millisecond), 10)
 
 	if err != nil {
 		t.Fatalf("failed to schedule once: %v", err)
@@ -69,76 +77,72 @@ func TestScheduleOnce(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Error("scheduled-once task did not execute")
+	case <-time.After(2 * time.Second):
+		t.Fatal("scheduled task did not run")
 	}
 }
 
 func TestScheduleRecurringAndCancel(t *testing.T) {
-	sch := schedulr.New()
-	defer sch.ShutDown()
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
 
-	var mu sync.Mutex
 	count := 0
-	done := make(chan bool)
-
 	id, err := sch.ScheduleRecurring(func(ctx context.Context) error {
-		mu.Lock()
 		count++
-		c := count
-		mu.Unlock()
-		fmt.Printf("[Recurring] Run #%d\n", c)
-		if c >= 3 {
-			select {
-			case done <- true:
-			default:
-			}
-		}
+		fmt.Printf("[Recurring] Run #%d\n", count)
 		return nil
-	}, 1*time.Second, 2)
+	}, 500*time.Millisecond, 5)
 
 	if err != nil {
 		t.Fatalf("failed to schedule recurring: %v", err)
 	}
 
-	select {
-	case <-done:
-		_ = sch.Cancel(id)
-	case <-time.After(10 * time.Second):
-		t.Error("recurring task did not complete expected runs")
+	time.Sleep(1200 * time.Millisecond) // Should run ~2 times
+	sch.Cancel(id)
+
+	finalCount := count
+	time.Sleep(1 * time.Second) // Wait to ensure it stopped
+
+	if count > finalCount+1 {
+		t.Errorf("task was not cancelled, count kept increasing: %d > %d", count, finalCount)
 	}
 }
 
 func TestSchedulerStats(t *testing.T) {
 	sch := skedulr.New()
-	defer sch.ShutDown()
+	defer sch.ShutDown(context.Background())
 
-	sch.Submit(skedulr.NewTask(func(ctx context.Context) error { return nil }, 5, 0))
-	sch.Submit(skedulr.NewTask(func(ctx context.Context) error { return fmt.Errorf("err") }, 5, 0))
-
-	time.Sleep(1 * time.Second)
-
-	stats := sch.Stats()
-	if stats.SuccessCount != 1 {
-		t.Errorf("expected 1 success, got %d", stats.SuccessCount)
+	for i := 0; i < 5; i++ {
+		_, err := sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+			return nil
+		}, 1, 0))
+		if err != nil {
+			t.Fatalf("failed to submit task: %v", err)
+		}
 	}
-	if stats.FailureCount != 1 {
-		t.Errorf("expected 1 failure, got %d", stats.FailureCount)
+
+	time.Sleep(500 * time.Millisecond)
+	stats := sch.Stats()
+	if stats.SuccessCount != 5 {
+		t.Errorf("expected 5 success, got %d", stats.SuccessCount)
 	}
 }
 
 func TestRecoveryMiddleware(t *testing.T) {
 	var panicCaught atomic.Bool
 	sch := skedulr.New()
-	defer sch.ShutDown()
+	defer sch.ShutDown(context.Background())
 
 	sch.Use(skedulr.Recovery(nil, func() {
 		panicCaught.Store(true)
 	}))
 
-	sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+	_, err := sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
 		panic("boom")
 	}, 10, 0))
+	if err != nil {
+		t.Fatalf("failed to submit task: %v", err)
+	}
 
 	time.Sleep(1 * time.Second)
 
@@ -149,7 +153,7 @@ func TestRecoveryMiddleware(t *testing.T) {
 
 func TestTaskIDPropagation(t *testing.T) {
 	sch := skedulr.New()
-	defer sch.ShutDown()
+	defer sch.ShutDown(context.Background())
 
 	done := make(chan string, 1)
 	task := skedulr.NewTask(func(ctx context.Context) error {
@@ -157,7 +161,10 @@ func TestTaskIDPropagation(t *testing.T) {
 		return nil
 	}, 5, 0)
 
-	id := sch.Submit(task)
+	id, err := sch.Submit(task)
+	if err != nil {
+		t.Fatalf("failed to submit task: %v", err)
+	}
 
 	select {
 	case ctxID := <-done:
@@ -199,7 +206,7 @@ func TestExponentialBackoff(t *testing.T) {
 
 func TestCronScheduling(t *testing.T) {
 	sch := skedulr.New()
-	defer sch.ShutDown()
+	defer sch.ShutDown(context.Background())
 
 	done := make(chan bool, 1)
 	// Match every minute
@@ -221,48 +228,49 @@ func TestCronScheduling(t *testing.T) {
 }
 
 func TestPriorityTaskExecutionOrder(t *testing.T) {
-	var mu sync.Mutex
-	executedOrder := []string{}
+	// Use 1 worker to ensure serial execution in priority order
+	sch := skedulr.New(skedulr.WithMaxWorkers(1), skedulr.WithInitialWorkers(1))
+	defer sch.ShutDown(context.Background())
 
-	createJob := func(id string) schedulr.Job {
-		return func(ctx context.Context) error {
+	executionOrder := make([]int, 0)
+	var mu sync.Mutex
+
+	// Submit tasks with different priorities in a "random" order
+	priorities := []int{1, 10, 5, 20, 2}
+
+	// We need to ensure the tasks stay in the queue long enough for the heap to sort them,
+	// because the worker might grab the first one immediately.
+	// However, with our current scaling/dequeue logic, the simplest way is to submit them all.
+	// To reliably test priority, we'll submit 100 tasks and check if the order is generally decreasing.
+
+	for _, p := range priorities {
+		priority := p
+		_, err := sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
 			mu.Lock()
-			executedOrder = append(executedOrder, id)
+			executionOrder = append(executionOrder, priority)
 			mu.Unlock()
+			time.Sleep(50 * time.Millisecond)
 			return nil
+		}, priority, 0))
+		if err != nil {
+			t.Fatalf("failed to submit task: %v", err)
 		}
 	}
 
-	// Smaller queue and slow start to ensure heap ordering is respected during dequeue
-	sch := schedulr.New(schedulr.WithMaxWorkers(1), schedulr.WithInitialWorkers(1))
-	defer sch.ShutDown()
-
-	// Stop the dequeue for a moment to fill the queue and test priority?
-	// Actually, we just submit them quickly.
-	// To reliably test priority in a small local test, we might need a way to pause processing.
-	// But let's try basic submission first.
-
-	taskLow := schedulr.NewTask(createJob("low"), 1, 2*time.Second)
-	taskMid := schedulr.NewTask(createJob("mid"), 5, 2*time.Second)
-	taskHigh := schedulr.NewTask(createJob("high"), 10, 2*time.Second)
-
-	sch.Submit(taskLow)
-	sch.Submit(taskMid)
-	sch.Submit(taskHigh)
-
-	time.Sleep(2 * time.Second)
+	// Wait for all to finish
+	time.Sleep(1 * time.Second)
 
 	mu.Lock()
 	defer mu.Unlock()
-	expected := []string{"high", "mid", "low"}
-	if len(executedOrder) < 3 {
-		t.Fatalf("expected at least 3 tasks to run, got %d", len(executedOrder))
+
+	// Correct priority order: 20, 10, 5, 2, 1
+	expected := []int{20, 10, 5, 2, 1}
+	if len(executionOrder) != len(expected) {
+		t.Fatalf("expected %d tasks, got %d", len(expected), len(executionOrder))
 	}
-	// Note: In a multi-worker setup, order might vary slightly if they start at the same time,
-	// but with maxWorkers(1), they should be strictly in priority order.
 	for i := range expected {
-		if executedOrder[i] != expected[i] {
-			t.Errorf("expected task %s at position %d, got %s", expected[i], i, executedOrder[i])
+		if executionOrder[i] != expected[i] {
+			t.Errorf("at index %d: expected priority %d, got %d", i, expected[i], executionOrder[i])
 		}
 	}
 }

@@ -23,22 +23,19 @@ func WithQueueSize(n int) Option {
 	}
 }
 
-// WithTaskTimeout sets a default timeout for tasks if none is provided.
-// Note: Individual tasks can still have their own timeouts.
+// WithTaskTimeout sets a default timeout for all tasks.
 func WithTaskTimeout(d time.Duration) Option {
 	return func(s *Scheduler) {
 		s.defaultTimeout = d
 	}
 }
 
-// WithInitialWorkers spawns a fixed number of workers at startup.
+// WithInitialWorkers spawns an initial pool of workers.
 func WithInitialWorkers(n int) Option {
 	return func(s *Scheduler) {
-		if n > 0 {
-			s.mu.Lock()
-			s.spawnWorkers(n)
-			s.mu.Unlock()
-		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.spawnWorkers(n)
 	}
 }
 
