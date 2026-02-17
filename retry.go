@@ -2,6 +2,7 @@ package skedulr
 
 import (
 	"math"
+	"math/rand"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type ExponentialBackoff struct {
 	MaxAttempts int
 	BaseDelay   time.Duration
 	MaxDelay    time.Duration
+	Jitter      float64 // Jitter factor (0-1), e.g., 0.1 for 10% jitter
 }
 
 func (e *ExponentialBackoff) NextDelay(attempt int) (time.Duration, bool) {
@@ -26,6 +28,13 @@ func (e *ExponentialBackoff) NextDelay(attempt int) (time.Duration, bool) {
 	delay := time.Duration(float64(e.BaseDelay) * math.Pow(2, float64(attempt)))
 	if delay > e.MaxDelay {
 		delay = e.MaxDelay
+	}
+
+	if e.Jitter > 0 {
+		// Apply random jitter
+		jitterAmount := float64(delay) * e.Jitter
+		randomJitter := (rand.Float64()*2 - 1) * jitterAmount // Between -jitterAmount and +jitterAmount
+		delay += time.Duration(randomJitter)
 	}
 
 	return delay, true

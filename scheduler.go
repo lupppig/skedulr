@@ -66,12 +66,29 @@ type Scheduler struct {
 }
 
 // SchedulerStats provides a snapshot of the scheduler's current state.
+// SchedulerStats provides a snapshot of the scheduler's current state.
 type SchedulerStats struct {
 	QueueSize      int64
 	SuccessCount   int64
 	FailureCount   int64
 	PanicCount     int64
 	CurrentWorkers int32
+}
+
+// TaskStatus represents the current state of a task.
+type TaskStatus int
+
+const (
+	StatusUnknown TaskStatus = iota
+	StatusQueued
+	StatusRunning
+	StatusSucceeded
+	StatusFailed
+	StatusCancelled
+)
+
+func (s TaskStatus) String() string {
+	return [...]string{"Unknown", "Queued", "Running", "Succeeded", "Failed", "Cancelled"}[s]
 }
 
 type task struct {
@@ -82,6 +99,7 @@ type task struct {
 	cancel        context.CancelFunc
 	retryStrategy RetryStrategy
 	attempts      int
+	status        TaskStatus
 }
 
 // New creates a new Scheduler with the provided options.
@@ -186,6 +204,12 @@ func (s *Scheduler) worker() {
 			if !ok {
 				return
 			}
+			s.mu.Lock()
+			// Update status by pointer in the tracking map if found
+			if trackTask, ok := s.tasks[t.id]; ok {
+				trackTask.status = StatusRunning
+			}
+			s.mu.Unlock()
 			s.runTask(t)
 		case <-s.stop:
 			return
@@ -236,16 +260,42 @@ func (s *Scheduler) runTask(t task) {
 
 	select {
 	case err := <-done:
+		s.mu.Lock()
 		if err != nil {
+			t.status = StatusFailed
+			s.mu.Unlock()
 			s.logger.Error("task failed", err, "task_id", t.id)
 			s.handleFailure(t, err)
 		} else {
+			t.status = StatusSucceeded
+			s.mu.Unlock()
 			atomic.AddInt64(&s.successCount, 1)
 		}
 	case <-ctx.Done():
+		s.mu.Lock()
+		t.status = StatusFailed
+		s.mu.Unlock()
 		s.logger.Error("task context cancelled or timed out", ctx.Err(), "task_id", t.id)
 		s.handleFailure(t, ctx.Err())
 	}
+
+	// For one-off tasks (not identified as recurring), clean up from the tracking map
+	// However, recurring tasks create new task objects for each run, so we need careful cleaning.
+	// Simple approach: After terminal state, remove from map.
+	s.mu.Lock()
+	delete(s.tasks, t.id)
+	s.mu.Unlock()
+}
+
+// Status returns the current status of a task.
+// If the task graduated or never existed, it returns StatusUnknown.
+func (s *Scheduler) Status(id string) TaskStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if t, ok := s.tasks[id]; ok {
+		return t.status
+	}
+	return StatusUnknown
 }
 
 func (s *Scheduler) handleFailure(t task, err error) {
@@ -300,6 +350,8 @@ func (s *Scheduler) Submit(t *task) string {
 		t.retryStrategy = s.retryStrategy
 	}
 
+	t.status = StatusQueued
+	s.tasks[t.id] = t
 	heap.Push(&s.queue, t)
 	atomic.AddInt64(&s.queueSize, 1)
 	s.cond.Signal()

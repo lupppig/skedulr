@@ -59,13 +59,15 @@ sch.Use(skedulr.Recovery(myLogger, func() {
 }))
 ```
 
-## 🔢 Stats
+## 🔢 Stats & Status
 
-Monitor the health of your scheduler in real-time:
+Monitor the health of your scheduler and individual tasks:
 ```go
+// Scheduler-wide stats
 stats := s.Stats()
-fmt.Printf("Success: %d, Failures: %d, Queue Depth: %d\n", 
-    stats.SuccessCount, stats.FailureCount, stats.QueueSize)
+
+// Individual task status
+status := s.Status(taskID) // e.g., skedulr.StatusRunning
 ```
 
 ## ⚖️ License
