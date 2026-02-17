@@ -27,3 +27,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Antigravity contract (local only)
+antigravity.md

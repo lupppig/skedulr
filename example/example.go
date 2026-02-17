@@ -5,20 +5,20 @@ import (
 	"fmt"
 	"time"
 
-	schedulr "github.com/kehl-gopher/skedulr"
+	"github.com/kehl-gopher/skedulr"
 )
 
 func main() {
 	// Initialize scheduler with custom options
-	// The package name is 'schedulr' inside the 'skedulr' module
-	s := schedulr.New(
-		schedulr.WithMaxWorkers(5),
-		schedulr.WithTaskTimeout(10*time.Second),
+	// The package name is 'skedulr' inside the 'skedulr' module
+	s := skedulr.New(
+		skedulr.WithMaxWorkers(5),
+		skedulr.WithTaskTimeout(10*time.Second),
 	)
 	defer s.ShutDown()
 
 	// 1. Submit a simple task
-	s.Submit(schedulr.NewTask(func(ctx context.Context) error {
+	s.Submit(skedulr.NewTask(func(ctx context.Context) error {
 		fmt.Println("Running a one-off task")
 		return nil
 	}, 10, 0))

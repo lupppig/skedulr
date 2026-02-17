@@ -1,4 +1,4 @@
-package schedulr
+package skedulr
 
 import "time"
 
@@ -39,5 +39,12 @@ func WithInitialWorkers(n int) Option {
 			s.spawnWorkers(n)
 			s.mu.Unlock()
 		}
+	}
+}
+
+// WithRetryStrategy sets a default retry strategy for the scheduler.
+func WithRetryStrategy(rs RetryStrategy) Option {
+	return func(s *Scheduler) {
+		s.retryStrategy = rs
 	}
 }

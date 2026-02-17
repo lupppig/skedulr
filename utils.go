@@ -1,4 +1,4 @@
-package schedulr
+package skedulr
 
 import (
 	"math"

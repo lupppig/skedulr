@@ -1,5 +1,98 @@
-package schedulr
+package skedulr
 
-// TODO: Extend scheduler to support full cron expression parsing and execution.
-// This will allow tasks to be scheduled using standard cron syntax like "*/5 * * * *".
-// Will be back to implement this shortly. Stay tuned! 
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// scheduleCronInternal parses a simple cron string and schedules the job.
+// Supported: "minute hour day month weekday"
+// "*" means all.
+func (s *Scheduler) ScheduleCron(spec string, job Job, priority int) (string, error) {
+	fields := strings.Fields(spec)
+	if len(fields) != 5 {
+		return "", fmt.Errorf("invalid cron spec: %s", spec)
+	}
+
+	id := generateId()
+	ctx, cancel := context.WithCancel(context.Background())
+
+	t := &task{
+		id:       id,
+		job:      job,
+		priority: priority,
+		cancel:   cancel,
+	}
+
+	s.mu.Lock()
+	s.tasks[id] = t
+	s.mu.Unlock()
+
+	go func() {
+		defer cancel()
+		for {
+			now := time.Now().Truncate(time.Minute)
+			next := s.nextExecution(now, fields)
+
+			delay := time.Until(next)
+			if delay <= 0 {
+				delay = time.Minute // safety
+			}
+
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+				s.Submit(NewTask(job, priority, 0))
+				// Wait for the next minute to avoid double scheduling if next is very close
+				time.Sleep(1 * time.Second)
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-s.stop:
+				timer.Stop()
+				return
+			}
+		}
+	}()
+
+	return id, nil
+}
+
+func (s *Scheduler) nextExecution(from time.Time, fields []string) time.Time {
+	// Simple implementation: check next minutes one by one
+	// This is not the most efficient but stays small and dependency-light.
+	// For production we might optimize this if we had many cron jobs.
+	curr := from.Add(time.Minute)
+	for i := 0; i < 525600; i++ { // check up to a year
+		if s.match(curr, fields) {
+			return curr
+		}
+		curr = curr.Add(time.Minute)
+	}
+	return from.Add(time.Hour * 24 * 365)
+}
+
+func (s *Scheduler) match(t time.Time, fields []string) bool {
+	return s.matchField(strconv.Itoa(t.Minute()), fields[0]) &&
+		s.matchField(strconv.Itoa(t.Hour()), fields[1]) &&
+		s.matchField(strconv.Itoa(t.Day()), fields[2]) &&
+		s.matchField(strconv.Itoa(int(t.Month())), fields[3]) &&
+		s.matchField(strconv.Itoa(int(t.Weekday())), fields[4])
+}
+
+func (s *Scheduler) matchField(val string, pattern string) bool {
+	if pattern == "*" {
+		return true
+	}
+	// Support comma separated values
+	parts := strings.Split(pattern, ",")
+	for _, p := range parts {
+		if p == val {
+			return true
+		}
+	}
+	return false
+}

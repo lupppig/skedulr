@@ -1,4 +1,4 @@
-package schedulr
+package skedulr
 
 import (
 	"container/heap"
@@ -54,16 +54,32 @@ type Scheduler struct {
 	maxWorkers     int
 	currentWorkers int32
 	queueSize      int64 // Atomic tracker for queue size
+	successCount   int64 // Atomic tracker for successful tasks
+	failureCount   int64 // Atomic tracker for failed tasks
+	panicCount     int64 // Atomic tracker for panics caught
 	defaultTimeout time.Duration
+	retryStrategy  RetryStrategy
+	middlewares    []Middleware
 	wg             sync.WaitGroup
 }
 
+// SchedulerStats provides a snapshot of the scheduler's current state.
+type SchedulerStats struct {
+	QueueSize      int64
+	SuccessCount   int64
+	FailureCount   int64
+	PanicCount     int64
+	CurrentWorkers int32
+}
+
 type task struct {
-	id       string
-	job      Job
-	timeout  time.Duration
-	priority int
-	cancel   context.CancelFunc
+	id            string
+	job           Job
+	timeout       time.Duration
+	priority      int
+	cancel        context.CancelFunc
+	retryStrategy RetryStrategy
+	attempts      int
 }
 
 // New creates a new Scheduler with the provided options.
@@ -181,18 +197,60 @@ func (s *Scheduler) runTask(t task) {
 	}
 	defer cancel()
 
+	// Apply middlewares
+	finalJob := t.job
+	for i := len(s.middlewares) - 1; i >= 0; i-- {
+		finalJob = s.middlewares[i](finalJob)
+	}
+
 	done := make(chan error, 1)
 	go func() {
-		done <- t.job(ctx)
+		done <- finalJob(ctx)
 	}()
 
 	select {
 	case err := <-done:
 		if err != nil {
-			// In production, we'd log this properly
+			s.handleFailure(t, err)
+		} else {
+			atomic.AddInt64(&s.successCount, 1)
 		}
 	case <-ctx.Done():
+		s.handleFailure(t, ctx.Err())
 	}
+}
+
+func (s *Scheduler) handleFailure(t task, err error) {
+	atomic.AddInt64(&s.failureCount, 1)
+
+	if t.retryStrategy != nil {
+		delay, retry := t.retryStrategy.NextDelay(t.attempts)
+		if retry {
+			t.attempts++
+			// Schedule retry
+			time.AfterFunc(delay, func() {
+				s.Submit(&t)
+			})
+		}
+	}
+}
+
+// Stats returns a snapshot of the scheduler's statistics.
+func (s *Scheduler) Stats() SchedulerStats {
+	return SchedulerStats{
+		QueueSize:      atomic.LoadInt64(&s.queueSize),
+		SuccessCount:   atomic.LoadInt64(&s.successCount),
+		FailureCount:   atomic.LoadInt64(&s.failureCount),
+		PanicCount:     atomic.LoadInt64(&s.panicCount),
+		CurrentWorkers: atomic.LoadInt32(&s.currentWorkers),
+	}
+}
+
+// Use adds middlewares to the scheduler.
+func (s *Scheduler) Use(mw ...Middleware) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.middlewares = append(s.middlewares, mw...)
 }
 
 // NewTask creates a new task instance.
@@ -209,6 +267,11 @@ func NewTask(job Job, priority int, timeout time.Duration) *task {
 func (s *Scheduler) Submit(t *task) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if t.retryStrategy == nil {
+		t.retryStrategy = s.retryStrategy
+	}
+
 	heap.Push(&s.queue, t)
 	atomic.AddInt64(&s.queueSize, 1)
 	return t.id

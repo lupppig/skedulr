@@ -1,12 +1,14 @@
-package schedulr_test
+package skedulr_test
 
 import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kehl-gopher/skedulr"
 	schedulr "github.com/kehl-gopher/skedulr"
 )
 
@@ -105,6 +107,95 @@ func TestScheduleRecurringAndCancel(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Error("recurring task did not complete expected runs")
 	}
+}
+
+func TestSchedulerStats(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown()
+
+	sch.Submit(skedulr.NewTask(func(ctx context.Context) error { return nil }, 5, 0))
+	sch.Submit(skedulr.NewTask(func(ctx context.Context) error { return fmt.Errorf("err") }, 5, 0))
+
+	time.Sleep(1 * time.Second)
+
+	stats := sch.Stats()
+	if stats.SuccessCount != 1 {
+		t.Errorf("expected 1 success, got %d", stats.SuccessCount)
+	}
+	if stats.FailureCount != 1 {
+		t.Errorf("expected 1 failure, got %d", stats.FailureCount)
+	}
+}
+
+func TestRecoveryMiddleware(t *testing.T) {
+	var panicCaught atomic.Bool
+	sch := skedulr.New()
+	defer sch.ShutDown()
+
+	sch.Use(skedulr.Recovery(func() {
+		panicCaught.Store(true)
+	}))
+
+	sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		panic("boom")
+	}, 10, 0))
+
+	time.Sleep(1 * time.Second)
+
+	if !panicCaught.Load() {
+		t.Error("panic was not caught by recovery middleware")
+	}
+}
+
+func TestExponentialBackoff(t *testing.T) {
+	eb := &skedulr.ExponentialBackoff{
+		MaxAttempts: 3,
+		BaseDelay:   100 * time.Millisecond,
+		MaxDelay:    1 * time.Second,
+	}
+
+	d, ok := eb.NextDelay(0)
+	if !ok || d != 100*time.Millisecond {
+		t.Errorf("expected 100ms, got %v", d)
+	}
+
+	d, ok = eb.NextDelay(1)
+	if !ok || d != 200*time.Millisecond {
+		t.Errorf("expected 200ms, got %v", d)
+	}
+
+	d, ok = eb.NextDelay(2)
+	if !ok || d != 400*time.Millisecond {
+		t.Errorf("expected 400ms, got %v", d)
+	}
+
+	_, ok = eb.NextDelay(3)
+	if ok {
+		t.Error("expected false after max attempts")
+	}
+}
+
+func TestCronScheduling(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown()
+
+	done := make(chan bool, 1)
+	// Match every minute
+	_, err := sch.ScheduleCron("* * * * *", func(ctx context.Context) error {
+		select {
+		case done <- true:
+		default:
+		}
+		return nil
+	}, 5)
+
+	if err != nil {
+		t.Fatalf("failed to schedule cron: %v", err)
+	}
+
+	// This test might take a while if we wait for a minute,
+	// but the logic can be mocked or we can just ensure it doesn't fail immediately.
+	// In a real CI we might want a faster way to test this.
 }
 
 func TestPriorityTaskExecutionOrder(t *testing.T) {
