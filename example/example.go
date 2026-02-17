@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kehl-gopher/skedulr"
+	"github.com/lupppig/skedulr"
 )
 
 func main() {

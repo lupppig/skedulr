@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kehl-gopher/skedulr"
+	"github.com/lupppig/skedulr"
 )
 
 func TestSubmitAndExecuteTask(t *testing.T) {

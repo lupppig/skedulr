@@ -1,107 +1,101 @@
-# Skedulr
+# 🕒 Skedulr
 
-A small, idiomatic, and highly performant in-memory task scheduler for Go. Designed for simplicity, bounded concurrency, and explicit control.
+[![Go Reference](https://pkg.go.dev/badge/github.com/lupppig/skedulr.svg)](https://pkg.go.dev/github.com/lupppig/skedulr)
+[![Go Report Card](https://goreportcard.com/status/github.com/lupppig/skedulr)](https://goreportcard.com/report/github.com/lupppig/skedulr)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 🚀 Getting Started
+**Skedulr** is a high-performance, concurrent task scheduler for Go, designed for production reliability and developer happiness. It features dynamic worker scaling, prioritized execution, retry strategies with jitter, and a powerful middleware system.
 
-### Installation
+## ✨ Features
+
+- 🚀 **Dynamic Scaling**: Automatically spins up workers based on task volume and idle-detects to scale down.
+- ⚖️ **Priority Queuing**: Jobs are executed based on user-defined priority levels.
+- 🔄 **Recursive & Timing**: Support for Cron syntax, one-off delays, and fixed intervals.
+- 🛡️ **Middleware System**: Comes with built-in `Recovery` and `Logging` support.
+- 🔁 **Smart Retries**: Exponential backoff with random jitter to prevent "thundering herds".
+- 🚦 **Zero-Idle CPU**: Uses `sync.Cond` for instant reaction times with zero polling overhead.
+- 🆔 **Context Propagation**: Task IDs are injected into `context.Context` for easy tracing.
+
+## 📦 Installation
+
 ```bash
-go get github.com/kehl-gopher/skedulr
+go get github.com/lupppig/skedulr
 ```
 
-### Basic Usage
+## 🚀 Quick Start
+
 ```go
 package main
 
 import (
     "context"
+    "fmt"
     "time"
-    "github.com/kehl-gopher/skedulr"
+    "github.com/lupppig/skedulr"
 )
 
 func main() {
-    // 1. Initialize with functional options
+    // 1. Initialize
     s := skedulr.New(
         skedulr.WithMaxWorkers(10),
         skedulr.WithTaskTimeout(5 * time.Second),
     )
-    defer s.ShutDown()
-
-    // 2. Submit a one-off task
-    s.Submit(skedulr.NewTask(func(ctx context.Context) error {
-        id := skedulr.TaskID(ctx) // Jobs can access their own Task ID
-        println("Running task:", id)
+    
+    // 2. Define a Job
+    job := func(ctx context.Context) error {
+        fmt.Println("Doing work...")
         return nil
-    }, 10, 0)) // priority 10, no override timeout
+    }
 
-    // 3. Schedule recurring tasks
-    s.ScheduleRecurring(func(ctx context.Context) error {
-        return nil
-    }, 1 * time.Minute, 5) // Run every minute, priority 5
+    // 3. Submit
+    id, err := s.Submit(skedulr.NewTask(job, 10, 0))
+    if err != nil {
+        panic(err)
+    }
+
+    // 4. Cleanup
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    s.ShutDown(ctx)
 }
 ```
 
-## 🛠 Features
+## 🛠️ Advanced Usage
 
-- **Bounded Concurrency**: Workers scale dynamically based on load but Nunca exceed the configured limit.
-- **Priority-Based**: Tasks are executed based on a heap-implemented priority queue.
-- **Middleware Support**: Wrap jobs with cross-cutting concerns (Logging, Recovery, etc.).
-- **Cron Support**: Lightweight parsing for `* * * * *` syntax.
-- **Retry Strategies**: Built-in support for Exponential Backoff.
-- **Zero Polling**: Uses `sync.Cond` for instant task execution with zero idle CPU overhead.
-
-## 🧱 Middleware
-
+### Middleware
+Wrap your jobs with global or per-scheduler logic.
 ```go
-sch := skedulr.New()
-sch.Use(skedulr.Recovery(myLogger, func() {
-    // custom logic on panic
-}))
+s.Use(skedulr.Recovery(myLogger, nil))
+s.Use(skedulr.Logging(myLogger))
 ```
 
-## 🔢 Stats & Status
-
-Monitor the health of your scheduler and individual tasks:
+### Scheduling (Cron & Intervals)
 ```go
-// Scheduler-wide stats
-stats := s.Stats()
+// Every weekday at 9 AM
+s.ScheduleCron("0 9 * * 1-5", myJob, 10)
 
-// Individual task status
-status := s.Status(taskID) // e.g., skedulr.StatusRunning
+// Every 30 seconds
+s.ScheduleRecurring(myJob, 30*time.Second, 5)
+```
+
+### Smart Retries
+```go
+skedulr.WithRetryStrategy(&skedulr.ExponentialBackoff{
+    MaxAttempts: 5,
+    BaseDelay:   1s,
+    Jitter:      0.1, // 10% random jitter
+})
+```
+
+## 📊 Monitoring
+Query the state of any task or the scheduler itself:
+```go
+// Get overall stats
+stats := s.Stats() // SuccessCount, FailureCount, QueueSize
+
+// Get specific task status
+status := s.Status(taskID) // Succeeded, Failed, Running, Queued
 ```
 
 ## ⚖️ License
-MIT
-lation
-
----
-
-## 📐 Architecture
-
-+-----------------------------+
-|        Task Scheduler       |
-+-----------------------------+
-| Priority Queue (heap)       |
-| Dynamic Worker Pool         |
-| Task Timeout Context        |
-| Scheduled & Recurring Tasks |
-+-----------------------------+
-```
-
----
-
-## 📌 TODO / Improvements
-
-- [ ] Retry failed tasks with backoff
-- [ ] Persist task queue to disk
-- [ ] Metrics (task count, failures, etc.)
-- [ ] Web dashboard for visibility
-- [ ] handle running cron task
-
----
-
-## 🧠 Example Use Cases
-
-- Running background jobs (e.g., emails, billing)
-- Queueing delayed tasks (e.g., notifications)
-- Real-time task dispatchers with load-based scaling
+MIT License. See [LICENSE](LICENSE) for details.

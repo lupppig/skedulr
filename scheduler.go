@@ -274,22 +274,30 @@ func (s *Scheduler) runTask(t task) {
 	select {
 	case err := <-done:
 		s.mu.Lock()
+		if trackTask, ok := s.tasks[t.id]; ok {
+			if err != nil {
+				trackTask.status = StatusFailed
+			} else {
+				trackTask.status = StatusSucceeded
+			}
+		}
+		s.mu.Unlock()
+
 		if err != nil {
-			t.status = StatusFailed
-			s.mu.Unlock()
 			if s.logger != nil {
 				s.logger.Error("task failed", err, "task_id", t.id)
 			}
 			s.handleFailure(t, err)
 		} else {
-			t.status = StatusSucceeded
-			s.mu.Unlock()
 			atomic.AddInt64(&s.successCount, 1)
 		}
 	case <-ctx.Done():
 		s.mu.Lock()
-		t.status = StatusFailed
+		if trackTask, ok := s.tasks[t.id]; ok {
+			trackTask.status = StatusFailed
+		}
 		s.mu.Unlock()
+
 		if s.logger != nil {
 			s.logger.Error("task context cancelled or timed out", ctx.Err(), "task_id", t.id)
 		}
@@ -321,10 +329,14 @@ func (s *Scheduler) handleFailure(t task, err error) {
 	if t.retryStrategy != nil {
 		delay, retry := t.retryStrategy.NextDelay(t.attempts)
 		if retry {
-			t.attempts++
-			// Schedule retry
+			// Create a fresh task for the retry to avoid sharing state with the failed instance
+			retryTask := NewTask(t.job, t.priority, t.timeout)
+			retryTask.id = t.id // Preserve ID for tracking
+			retryTask.attempts = t.attempts + 1
+			retryTask.retryStrategy = t.retryStrategy
+
 			time.AfterFunc(delay, func() {
-				s.Submit(&t)
+				s.Submit(retryTask)
 			})
 		}
 	}

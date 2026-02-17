@@ -1,4 +1,4 @@
-module github.com/kehl-gopher/skedulr
+module github.com/lupppig/skedulr
 
 go 1.24.4
 

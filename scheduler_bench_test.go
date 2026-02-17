@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kehl-gopher/skedulr"
+	"github.com/lupppig/skedulr"
 )
 
 func BenchmarkScheduleAndRun(b *testing.B) {
