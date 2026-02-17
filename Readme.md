@@ -20,7 +20,7 @@ Skedulr is a high-performance, concurrent task scheduler for Go, designed for pr
 
 ```bash
 # Update to the latest version with Dashboard support
-go get github.com/lupppig/skedulr@v1.0.3
+go get github.com/lupppig/skedulr@v1.0.4
 ```
 
 ## Quick Start
