@@ -653,3 +653,41 @@ func TestDashboard(t *testing.T) {
 		t.Fatalf("failed to decode stats: %v", err)
 	}
 }
+
+func TestDashboardHistory(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	// Run a quick task
+	done := make(chan struct{})
+	id, _ := sch.Submit(skedulr.NewTask(func(ctx context.Context) error {
+		close(done)
+		return nil
+	}, 10, 0))
+
+	<-done
+	time.Sleep(50 * time.Millisecond) // Wait for runTask to finish cleaning up and recording history
+
+	stats := sch.Stats()
+
+	// Should be in history, not active
+	foundInHistory := false
+	for _, task := range stats.History {
+		if task.ID == id {
+			foundInHistory = true
+			if task.Status != "Succeeded" {
+				t.Errorf("expected history status 'Succeeded', got %s", task.Status)
+			}
+		}
+	}
+
+	if !foundInHistory {
+		t.Error("task not found in dashboard history")
+	}
+
+	for _, task := range stats.ActiveTasks {
+		if task.ID == id {
+			t.Error("task still shown as active after completion")
+		}
+	}
+}

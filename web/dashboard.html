@@ -1,335 +1,390 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Skedulr Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-color: #0f111a;
-            --sidebar-bg: #1a1c2c;
-            --card-bg: rgba(26, 28, 44, 0.7);
-            --text-color: #e2e8f0;
-            --text-muted: #94a3b8;
-            --primary: #00f2ff;
-            --secondary: #6366f1;
-            --success: #10b981;
-            --danger: #f43f5e;
-            --glass-border: rgba(255, 255, 255, 0.1);
-        }
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Skedulr Dashboard</title>
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+	<style>
+		:root {
+			--bg-color: #0f111a;
+			--sidebar-bg: #1a1c2c;
+			--card-bg: rgba(26, 28, 44, 0.7);
+			--text-color: #e2e8f0;
+			--text-muted: #94a3b8;
+			--primary: #00f2ff;
+			--secondary: #6366f1;
+			--success: #10b981;
+			--danger: #f43f5e;
+			--glass-border: rgba(255, 255, 255, 0.1);
+		}
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
 
-        body {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            display: flex;
-            min-height: 100vh;
-            overflow-x: hidden;
-        }
+		body {
+			font-family: 'Inter', sans-serif;
+			background-color: var(--bg-color);
+			color: var(--text-color);
+			display: flex;
+			min-height: 100vh;
+			overflow-x: hidden;
+		}
 
-        /* Sidebar */
-        .sidebar {
-            width: 260px;
-            background-color: var(--sidebar-bg);
-            padding: 2rem 1.5rem;
-            display: flex;
-            flex-direction: column;
-            gap: 2rem;
-            border-right: 1px solid var(--glass-border);
-        }
+		/* Sidebar */
+		.sidebar {
+			width: 260px;
+			background-color: var(--sidebar-bg);
+			padding: 2rem 1.5rem;
+			display: flex;
+			flex-direction: column;
+			gap: 2rem;
+			border-right: 1px solid var(--glass-border);
+		}
 
-        .logo {
-            font-size: 1.5rem;
-            font-weight: 800;
-            background: linear-gradient(135deg, var(--primary), var(--secondary));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
+		.logo {
+			font-size: 1.5rem;
+			font-weight: 800;
+			background: linear-gradient(135deg, var(--primary), var(--secondary));
+			background-clip: text;
+			-webkit-background-clip: text;
+			-webkit-text-fill-color: transparent;
+			display: flex;
+			align-items: center;
+			gap: 0.5rem;
+		}
 
-        .nav-links {
-            list-style: none;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-        }
+		.nav-links {
+			list-style: none;
+			display: flex;
+			flex-direction: column;
+			gap: 0.5rem;
+		}
 
-        .nav-item {
-            padding: 0.75rem 1rem;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: all 0.2s;
-            color: var(--text-muted);
-            font-weight: 500;
-        }
+		.nav-item {
+			padding: 0.75rem 1rem;
+			border-radius: 8px;
+			cursor: pointer;
+			transition: all 0.2s;
+			color: var(--text-muted);
+			font-weight: 500;
+		}
 
-        .nav-item.active, .nav-item:hover {
-            background-color: rgba(255, 255, 255, 0.05);
-            color: var(--text-color);
-        }
+		.nav-item.active,
+		.nav-item:hover {
+			background-color: rgba(255, 255, 255, 0.05);
+			color: var(--text-color);
+		}
 
-        /* Main Content */
-        .main-content {
-            flex: 1;
-            padding: 2rem;
-            max-width: 1200px;
-            margin: 0 auto;
-        }
+		/* Main Content */
+		.main-content {
+			flex: 1;
+			padding: 2rem;
+			max-width: 1200px;
+			margin: 0 auto;
+		}
 
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 2rem;
-        }
+		header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			margin-bottom: 2rem;
+		}
 
-        h1 {
-            font-size: 1.875rem;
-            font-weight: 600;
-        }
+		h1 {
+			font-size: 1.875rem;
+			font-weight: 600;
+		}
 
-        /* Metrics Grid */
-        .metrics-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 1.5rem;
-            margin-bottom: 2rem;
-        }
+		/* Metrics Grid */
+		.metrics-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+			gap: 1.5rem;
+			margin-bottom: 2rem;
+		}
 
-        .metric-card {
-            background: var(--card-bg);
-            backdrop-filter: blur(10px);
-            padding: 1.5rem;
-            border-radius: 16px;
-            border: 1px solid var(--glass-border);
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-        }
+		.metric-card {
+			background: var(--card-bg);
+			backdrop-filter: blur(10px);
+			padding: 1.5rem;
+			border-radius: 16px;
+			border: 1px solid var(--glass-border);
+			display: flex;
+			flex-direction: column;
+			gap: 0.5rem;
+		}
 
-        .metric-label {
-            color: var(--text-muted);
-            font-size: 0.875rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
+		.metric-label {
+			color: var(--text-muted);
+			font-size: 0.875rem;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+		}
 
-        .metric-value {
-            font-size: 2rem;
-            font-weight: 700;
-        }
+		.metric-value {
+			font-size: 2rem;
+			font-weight: 700;
+		}
 
-        #metric-queue { color: var(--primary); }
-        #metric-success { color: var(--success); }
-        #metric-failure { color: var(--danger); }
+		#metric-queue {
+			color: var(--primary);
+		}
 
-        /* Task Table */
-        .content-card {
-            background: var(--card-bg);
-            backdrop-filter: blur(10px);
-            border-radius: 16px;
-            border: 1px solid var(--glass-border);
-            padding: 1.5rem;
-        }
+		#metric-success {
+			color: var(--success);
+		}
 
-        .card-header {
-            margin-bottom: 1.5rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
+		#metric-failure {
+			color: var(--danger);
+		}
 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
+		/* Task Table */
+		.content-card {
+			background: var(--card-bg);
+			backdrop-filter: blur(10px);
+			border-radius: 16px;
+			border: 1px solid var(--glass-border);
+			padding: 1.5rem;
+		}
 
-        th {
-            text-align: left;
-            color: var(--text-muted);
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            padding: 1rem;
-            border-bottom: 1px solid var(--glass-border);
-        }
+		.card-header {
+			margin-bottom: 1.5rem;
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+		}
 
-        td {
-            padding: 1rem;
-            font-size: 0.875rem;
-            border-bottom: 1px solid var(--glass-border);
-        }
+		table {
+			width: 100%;
+			border-collapse: collapse;
+		}
 
-        .status-badge {
-            padding: 0.25rem 0.6rem;
-            border-radius: 12px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            text-transform: capitalize;
-        }
+		th {
+			text-align: left;
+			color: var(--text-muted);
+			font-size: 0.75rem;
+			text-transform: uppercase;
+			padding: 1rem;
+			border-bottom: 1px solid var(--glass-border);
+		}
 
-        .status-running { background: rgba(16, 185, 129, 0.1); color: var(--success); }
-        .status-queued { background: rgba(0, 242, 255, 0.1); color: var(--primary); }
-        .status-retrying { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
+		td {
+			padding: 1rem;
+			font-size: 0.875rem;
+			border-bottom: 1px solid var(--glass-border);
+		}
 
-        .cancel-btn {
-            background: transparent;
-            border: 1px solid var(--danger);
-            color: var(--danger);
-            padding: 0.4rem 0.8rem;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.75rem;
-            transition: all 0.2s;
-        }
+		.status-badge {
+			padding: 0.25rem 0.6rem;
+			border-radius: 12px;
+			font-size: 0.75rem;
+			font-weight: 600;
+			text-transform: capitalize;
+		}
 
-        .cancel-btn:hover {
-            background: var(--danger);
-            color: white;
-        }
+		.status-running {
+			background: rgba(16, 185, 129, 0.1);
+			color: var(--success);
+		}
 
-        /* Micro-animations */
-        @keyframes pulse {
-            0% { transform: scale(1); opacity: 0.8; }
-            50% { transform: scale(1.05); opacity: 1; }
-            100% { transform: scale(1); opacity: 0.8; }
-        }
+		.status-queued {
+			background: rgba(0, 242, 255, 0.1);
+			color: var(--primary);
+		}
 
-        .live-indicator {
-            width: 8px;
-            height: 8px;
-            background: var(--success);
-            border-radius: 50%;
-            display: inline-block;
-            margin-right: 0.5rem;
-            animation: pulse 2s infinite ease-in-out;
-        }
-    </style>
+		.status-retrying {
+			background: rgba(245, 158, 11, 0.1);
+			color: #f59e0b;
+		}
+
+		.status-succeeded {
+			background: rgba(16, 185, 129, 0.2);
+			color: var(--success);
+		}
+
+		.status-failed {
+			background: rgba(244, 63, 94, 0.15);
+			color: var(--danger);
+		}
+
+		.status-cancelled {
+			background: rgba(148, 163, 184, 0.1);
+			color: var(--text-muted);
+		}
+
+		.cancel-btn {
+			background: transparent;
+			border: 1px solid var(--danger);
+			color: var(--danger);
+			padding: 0.4rem 0.8rem;
+			border-radius: 6px;
+			cursor: pointer;
+			font-size: 0.75rem;
+			transition: all 0.2s;
+		}
+
+		.cancel-btn:hover {
+			background: var(--danger);
+			color: white;
+		}
+
+		/* Micro-animations */
+		@keyframes pulse {
+			0% {
+				transform: scale(1);
+				opacity: 0.8;
+			}
+
+			50% {
+				transform: scale(1.05);
+				opacity: 1;
+			}
+
+			100% {
+				transform: scale(1);
+				opacity: 0.8;
+			}
+		}
+
+		.live-indicator {
+			width: 8px;
+			height: 8px;
+			background: var(--success);
+			border-radius: 50%;
+			display: inline-block;
+			margin-right: 0.5rem;
+			animation: pulse 2s infinite ease-in-out;
+		}
+	</style>
 </head>
+
 <body>
-    <div class="sidebar">
-        <div class="logo">
-           SKEDULR
-        </div>
-        <ul class="nav-links">
-            <li class="nav-item active">Dashboard</li>
-            <li class="nav-item">Tasks</li>
-            <li class="nav-item">Workers</li>
-            <li class="nav-item">Settings</li>
-        </ul>
-    </div>
+	<div class="sidebar">
+		<div class="logo">
+			SKEDULR
+		</div>
+		<ul class="nav-links">
+			<li class="nav-item active" onclick="location.hash=''">Dashboard</li>
+			<li class="nav-item" onclick="document.querySelector('.content-card').scrollIntoView({behavior:'smooth'})">
+				Tasks</li>
+			<li class="nav-item" onclick="document.querySelector('.metrics-grid').scrollIntoView({behavior:'smooth'})">
+				Workers</li>
+		</ul>
+	</div>
 
-    <div class="main-content">
-        <header>
-            <h1>System Overview</h1>
-            <div>
-                <span class="live-indicator"></span>
-                <span style="font-size: 0.75rem; color: var(--text-muted)">LIVE UPDATES</span>
-            </div>
-        </header>
+	<div class="main-content">
+		<header>
+			<h1>System Overview</h1>
+			<div>
+				<span class="live-indicator"></span>
+				<span style="font-size: 0.75rem; color: var(--text-muted)">LIVE UPDATES</span>
+			</div>
+		</header>
 
-        <div class="metrics-grid">
-            <div class="metric-card">
-                <span class="metric-label">Queue Size</span>
-                <span class="metric-value" id="metric-queue">0</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">Processed</span>
-                <span class="metric-value" id="metric-success">0</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">Failed</span>
-                <span class="metric-value" id="metric-failure">0</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label">Active Workers</span>
-                <span class="metric-value" style="color: var(--secondary)" id="metric-workers">0</span>
-            </div>
-        </div>
+		<div class="metrics-grid">
+			<div class="metric-card">
+				<span class="metric-label">Queue Size</span>
+				<span class="metric-value" id="metric-queue">0</span>
+			</div>
+			<div class="metric-card">
+				<span class="metric-label">Processed</span>
+				<span class="metric-value" id="metric-success">0</span>
+			</div>
+			<div class="metric-card">
+				<span class="metric-label">Failed</span>
+				<span class="metric-value" id="metric-failure">0</span>
+			</div>
+			<div class="metric-card">
+				<span class="metric-label">Active Workers</span>
+				<span class="metric-value" style="color: var(--secondary)" id="metric-workers">0</span>
+			</div>
+		</div>
 
-        <div class="content-card">
-            <div class="card-header">
-                <h2>Active Tasks</h2>
-            </div>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Task ID</th>
-                        <th>Type</th>
-                        <th>Priority</th>
-                        <th>Status</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="task-list">
-                    <!-- Loaded dynamically -->
-                </tbody>
-            </table>
-        </div>
-    </div>
+		<div class="content-card">
+			<div class="card-header">
+				<h2>Task Logs & Activity</h2>
+			</div>
+			<table>
+				<thead>
+					<tr>
+						<th>Task ID</th>
+						<th>Type</th>
+						<th>Priority</th>
+						<th>Status</th>
+						<th>Actions</th>
+					</tr>
+				</thead>
+				<tbody id="task-list">
+					<!-- Loaded dynamically -->
+				</tbody>
+			</table>
+		</div>
+	</div>
 
-    <script>
-        async function fetchStats() {
-            try {
-                const response = await fetch('/api/stats');
-                const stats = await response.json();
-                updateUI(stats);
-            } catch (error) {
-                console.error('Failed to fetch stats:', error);
-            }
-        }
+	<script>
+		async function fetchStats() {
+			try {
+				const response = await fetch('/api/stats');
+				const stats = await response.json();
+				updateUI(stats);
+			} catch (error) {
+				console.error('Failed to fetch stats:', error);
+			}
+		}
 
-        function updateUI(stats) {
-            document.getElementById('metric-queue').textContent = stats.queue_size;
-            document.getElementById('metric-success').textContent = stats.success_count;
-            document.getElementById('metric-failure').textContent = stats.failure_count;
-            document.getElementById('metric-workers').textContent = stats.current_workers;
+		function updateUI(stats) {
+			document.getElementById('metric-queue').textContent = stats.queue_size;
+			document.getElementById('metric-success').textContent = stats.success_count;
+			document.getElementById('metric-failure').textContent = stats.failure_count;
+			document.getElementById('metric-workers').textContent = stats.current_workers;
 
-            const list = document.getElementById('task-list');
-            list.innerHTML = '';
+			const list = document.getElementById('task-list');
+			list.innerHTML = '';
 
-            if (stats.active_tasks && stats.active_tasks.length > 0) {
-                stats.active_tasks.forEach(task => {
-                    const row = document.createElement('tr');
-                    const statusClass = `status-${task.status.toLowerCase()}`;
-                    
-                    row.innerHTML = `
+			const allTasks = [...(stats.active_tasks || []), ...(stats.history || [])];
+
+			if (allTasks.length > 0) {
+				// Sort by ID (or you could pass a timestamp if available)
+				allTasks.forEach(task => {
+					const row = document.createElement('tr');
+					const statusClass = `status-${task.status.toLowerCase()}`;
+					const isTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task.status);
+
+					row.innerHTML = `
                         <td style="font-family: monospace; font-size: 0.75rem;">${task.id}</td>
                         <td>${task.type || 'In-Memory'}</td>
                         <td>${task.priority}</td>
                         <td><span class="status-badge ${statusClass}">${task.status}</span></td>
                         <td>
-                            <button class="cancel-btn" onclick="cancelTask('${task.id}')">Cancel</button>
+                            ${isTerminal ? '-' : `<button class="cancel-btn" onclick="cancelTask('${task.id}')">Cancel</button>`}
                         </td>
                     `;
-                    list.appendChild(row);
-                });
-            } else {
-                list.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 2rem;">No active tasks found.</td></tr>';
-            }
-        }
+					list.appendChild(row);
+				});
+			} else {
+				list.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 2rem;">No system activity detected yet.</td></tr>';
+			}
+		}
 
-        async function cancelTask(id) {
-            if (!confirm(`Are you sure you want to cancel task ${id}?`)) return;
-            try {
-                await fetch(`/api/cancel?id=${id}`, { method: 'POST' });
-                fetchStats(); // Update immediately
-            } catch (error) {
-                alert('Failed to cancel task');
-            }
-        }
+		async function cancelTask(id) {
+			if (!confirm(`Are you sure you want to cancel task ${id}?`)) return;
+			try {
+				await fetch(`/api/cancel?id=${id}`, { method: 'POST' });
+				fetchStats(); // Update immediately
+			} catch (error) {
+				alert('Failed to cancel task');
+			}
+		}
 
-        // Poll every 1 second
-        setInterval(fetchStats, 1000);
-        fetchStats(); // Initial load
-    </script>
+		// Poll every 1 second
+		setInterval(fetchStats, 1000);
+		fetchStats(); // Initial load
+	</script>
 </body>
+
 </html>

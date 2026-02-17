@@ -83,6 +83,8 @@ type Scheduler struct {
 	activeKeys     map[string]struct{}
 	instanceID     string
 	leaseDuration  time.Duration
+	history        []*task
+	historySize    int
 }
 
 // TaskStatus represents the current state of a task.
@@ -138,6 +140,10 @@ func New(opts ...Option) *Scheduler {
 		leaseDuration: 30 * time.Second, // Default lease
 	}
 	s.cond = sync.NewCond(&s.mu)
+
+	s.instanceID = generateId()
+	s.leaseDuration = 30 * time.Second
+	s.historySize = 50
 
 	for _, opt := range opts {
 		opt(s)
@@ -422,9 +428,24 @@ func (s *Scheduler) runTask(t task) {
 	// For one-off tasks (not identified as recurring), clean up from the tracking map
 	// However, recurring tasks create new task objects for each run, so we need careful cleaning.
 	// Simple approach: After terminal state, remove from map.
+	// Record history before removing from active tasks
 	s.mu.Lock()
+	s.recordHistory(t.id)
 	delete(s.tasks, t.id)
 	s.mu.Unlock()
+}
+
+func (s *Scheduler) recordHistory(id string) {
+	t, ok := s.tasks[id]
+	if !ok {
+		return
+	}
+
+	// Keep history within historySize limit
+	if len(s.history) >= s.historySize {
+		s.history = s.history[1:]
+	}
+	s.history = append(s.history, t)
 }
 
 // Status returns the current status of a task.

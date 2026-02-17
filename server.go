@@ -56,6 +56,17 @@ func (s *Scheduler) Stats() Stats {
 		})
 	}
 
+	history := make([]TaskInfo, 0, len(s.history))
+	for _, t := range s.history {
+		history = append(history, TaskInfo{
+			ID:       t.id,
+			Key:      t.key,
+			Type:     t.typeName,
+			Status:   t.status.String(),
+			Priority: t.priority,
+		})
+	}
+
 	return Stats{
 		QueueSize:      atomic.LoadInt64(&s.queueSize),
 		SuccessCount:   atomic.LoadInt64(&s.successCount),
@@ -63,6 +74,7 @@ func (s *Scheduler) Stats() Stats {
 		PanicCount:     atomic.LoadInt64(&s.panicCount),
 		CurrentWorkers: atomic.LoadInt32(&s.currentWorkers),
 		ActiveTasks:    tasks,
+		History:        history,
 	}
 }
 
@@ -74,6 +86,7 @@ type Stats struct {
 	PanicCount     int64      `json:"panic_count"`
 	CurrentWorkers int32      `json:"current_workers"`
 	ActiveTasks    []TaskInfo `json:"active_tasks"`
+	History        []TaskInfo `json:"history"`
 }
 
 // TaskInfo holds basic info about a task for the dashboard.
