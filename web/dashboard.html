@@ -9,15 +9,15 @@
 	<style>
 		:root {
 			--bg-color: #0f111a;
-			--sidebar-bg: #1a1c2c;
-			--card-bg: rgba(26, 28, 44, 0.7);
+			--sidebar-bg: #161824;
+			--card-bg: #1c1f2e;
 			--text-color: #e2e8f0;
 			--text-muted: #94a3b8;
-			--primary: #00f2ff;
+			--primary: #3b82f6;
 			--secondary: #6366f1;
 			--success: #10b981;
-			--danger: #f43f5e;
-			--glass-border: rgba(255, 255, 255, 0.1);
+			--danger: #ef4444;
+			--border-color: #2d3142;
 		}
 
 		* {
@@ -43,7 +43,7 @@
 			display: flex;
 			flex-direction: column;
 			gap: 2rem;
-			border-right: 1px solid var(--glass-border);
+			border-right: 1px solid var(--border-color);
 		}
 
 		.logo {
@@ -110,10 +110,9 @@
 
 		.metric-card {
 			background: var(--card-bg);
-			backdrop-filter: blur(10px);
 			padding: 1.5rem;
-			border-radius: 16px;
-			border: 1px solid var(--glass-border);
+			border-radius: 12px;
+			border: 1px solid var(--border-color);
 			display: flex;
 			flex-direction: column;
 			gap: 0.5rem;
@@ -143,12 +142,11 @@
 			color: var(--danger);
 		}
 
-		/* Task Table */
 		.content-card {
 			background: var(--card-bg);
-			backdrop-filter: blur(10px);
-			border-radius: 16px;
-			border: 1px solid var(--glass-border);
+			border-radius: 12px;
+			border: 1px solid var(--border-color);
+			overflow: hidden;
 			padding: 1.5rem;
 		}
 
@@ -382,7 +380,7 @@
 
 					let progressValue = task.progress || 0;
 					let boxColor = 'var(--primary)';
-					let boxBg = 'rgba(255, 255, 255, 0.05)';
+					let boxBg = '#1e293b'; // Solid dark bg for boxes
 
 					if (task.status === 'Succeeded') {
 						progressValue = 100;
