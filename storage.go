@@ -12,6 +12,7 @@ import (
 // PersistentTask represents the serializable state of a task.
 type PersistentTask struct {
 	ID            string        `json:"id"`
+	Key           string        `json:"key,omitempty"`
 	TypeName      string        `json:"type_name"`
 	Payload       []byte        `json:"payload,omitempty"`
 	Priority      int           `json:"priority"`

@@ -75,3 +75,12 @@ func WithJob(name string, job Job) Option {
 		s.RegisterJob(name, job)
 	}
 }
+
+// WithMaxCapacity sets the maximum number of tasks allowed in the queue.
+func WithMaxCapacity(n int) Option {
+	return func(s *Scheduler) {
+		if n > 0 {
+			s.maxQueueSize = n
+		}
+	}
+}

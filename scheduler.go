@@ -13,6 +13,10 @@ import (
 var (
 	// ErrSchedulerStopped is returned when an operation is attempted on a stopped scheduler.
 	ErrSchedulerStopped = errors.New("scheduler is stopped")
+	// ErrQueueFull is returned when the task queue has reached its maximum capacity.
+	ErrQueueFull = errors.New("scheduler queue is full")
+	// ErrJobAlreadyRunning is returned when a job with the same key is already in the queue or running.
+	ErrJobAlreadyRunning = errors.New("job with this key is already queued or running")
 )
 
 type taskQueue []*task
@@ -75,6 +79,8 @@ type Scheduler struct {
 	registry       map[string]Job
 	regMu          sync.RWMutex
 	wg             sync.WaitGroup
+	maxQueueSize   int
+	activeKeys     map[string]struct{}
 }
 
 // SchedulerStats provides a snapshot of the scheduler's current state.
@@ -110,6 +116,7 @@ func (s TaskStatus) String() string {
 
 type task struct {
 	id            string
+	key           string
 	job           Job
 	timeout       time.Duration
 	priority      int
@@ -124,13 +131,15 @@ type task struct {
 // New creates and starts a new Scheduler with the provided options.
 func New(opts ...Option) *Scheduler {
 	s := &Scheduler{
-		tasks:      make(map[string]*task),
-		jobQueue:   make(chan task), // Unbuffered for strict priority
-		queue:      make(taskQueue, 0),
-		stop:       make(chan struct{}),
-		maxWorkers: 10, // Default max workers
-		registry:   make(map[string]Job),
-		storage:    &InMemoryStorage{},
+		tasks:        make(map[string]*task),
+		jobQueue:     make(chan task),
+		queue:        make(taskQueue, 0),
+		stop:         make(chan struct{}),
+		maxWorkers:   5,
+		maxQueueSize: 1000,
+		registry:     make(map[string]Job),
+		storage:      &InMemoryStorage{},
+		activeKeys:   make(map[string]struct{}),
 	}
 	s.cond = sync.NewCond(&s.mu)
 
@@ -140,9 +149,11 @@ func New(opts ...Option) *Scheduler {
 
 	s.loadTasks()
 
-	s.wg.Add(2)
+	s.wg.Add(1)
 	go s.dequeueLoop()
-	go s.scalingLoop()
+
+	s.spawnWorkers(s.maxWorkers)
+
 	return s
 }
 
@@ -177,6 +188,7 @@ func (s *Scheduler) loadTasks() {
 
 		t := &task{
 			id:       pt.ID,
+			key:      pt.Key,
 			job:      job,
 			typeName: pt.TypeName,
 			payload:  pt.Payload,
@@ -217,46 +229,6 @@ func (s *Scheduler) dequeueLoop() {
 				s.mu.Unlock()
 			}
 		}
-	}
-}
-
-func (s *Scheduler) scalingLoop() {
-	defer s.wg.Done()
-	tick := time.NewTicker(1 * time.Second) // More frequent check
-	defer tick.Stop()
-
-	// Initial scale check
-	s.checkScale()
-
-	for {
-		select {
-		case <-tick.C:
-			s.checkScale()
-		case <-s.stop:
-			return
-		}
-	}
-}
-
-func (s *Scheduler) checkScale() {
-	currentQueueSize := int(atomic.LoadInt64(&s.queueSize))
-	target := calculateWorkerPertTask(currentQueueSize)
-	current := int(atomic.LoadInt32(&s.currentWorkers))
-
-	if target > current && current < s.maxWorkers {
-		s.mu.Lock()
-		if atomic.LoadInt32(&s.stopped) == 1 {
-			s.mu.Unlock()
-			return
-		}
-		toSpawn := target - current
-		if toSpawn+current > s.maxWorkers {
-			toSpawn = s.maxWorkers - current
-		}
-		if toSpawn > 0 {
-			s.spawnWorkers(toSpawn)
-		}
-		s.mu.Unlock()
 	}
 }
 
@@ -340,6 +312,10 @@ func (s *Scheduler) runTask(t task) {
 				trackTask.status = StatusSucceeded
 			}
 		}
+
+		if t.key != "" {
+			delete(s.activeKeys, t.key)
+		}
 		s.mu.Unlock()
 
 		if err != nil {
@@ -357,6 +333,9 @@ func (s *Scheduler) runTask(t task) {
 		s.mu.Lock()
 		if trackTask, ok := s.tasks[t.id]; ok {
 			trackTask.status = StatusFailed
+		}
+		if t.key != "" {
+			delete(s.activeKeys, t.key)
 		}
 		s.mu.Unlock()
 
@@ -460,6 +439,19 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Backpressure check
+	if len(s.tasks) >= s.maxQueueSize {
+		return "", ErrQueueFull
+	}
+
+	// Overlap prevention check
+	if t.key != "" {
+		if _, exists := s.activeKeys[t.key]; exists {
+			return "", ErrJobAlreadyRunning
+		}
+		s.activeKeys[t.key] = struct{}{}
+	}
+
 	if t.retryStrategy == nil {
 		t.retryStrategy = s.retryStrategy
 	}
@@ -481,6 +473,7 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 	if t.typeName != "" {
 		pt := &PersistentTask{
 			ID:       t.id,
+			Key:      t.key,
 			TypeName: t.typeName,
 			Payload:  t.payload,
 			Priority: t.priority,
@@ -497,6 +490,12 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 	atomic.AddInt64(&s.queueSize, 1)
 	s.cond.Signal()
 	return t.id, nil
+}
+
+// WithKey sets a unique key for the task to prevent overlapping executions.
+func (t *task) WithKey(key string) *task {
+	t.key = key
+	return t
 }
 
 // ScheduleOnce schedules a job to run at a specific time.
