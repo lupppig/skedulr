@@ -1,99 +1,81 @@
-# 🕒 schedulr — Go Task Scheduler
+# Skedulr
 
-`schedulr` is a priority-based task scheduler written in Go. It supports one-time and recurring task execution, dynamic worker scaling, timeout handling, and task cancellation — all without a single external dependency.
+A small, idiomatic, and highly performant in-memory task scheduler for Go. Designed for simplicity, bounded concurrency, and explicit control.
 
----
+## 🚀 Getting Started
 
-## ✨ Features
-
-- ⏱️ **Priority Queue** — Tasks with higher priority are executed first
-- 🧠 **Dynamic Worker Scaling** — Auto-adjusts worker count based on queue size
-- ⏳ **Timeout Support** — Cancel tasks that exceed their allowed runtime
-- 🔁 **Recurring Tasks** — Schedule tasks to run at fixed intervals
-- 📅 **One-Time Scheduling** — Delay execution until a specific time
-- ❌ **Graceful Cancellation** — Cancel scheduled tasks by ID
-- ✅ **Graceful Shutdown** — Ensures all running tasks complete before exit
-
----
-
-## 📦 Installation
-
+### Installation
 ```bash
 go get github.com/kehl-gopher/skedulr
 ```
 
----
-
-## 🚀 Getting Started
-
-### Initialize the Scheduler
-
+### Basic Usage
 ```go
-scheduler := schedulr.SchedulerInit()
-defer scheduler.ShutDown()
-```
+package main
 
----
+import (
+    "context"
+    "time"
+    "github.com/kehl-gopher/skedulr"
+)
 
-### Create and Submit a Task
+func main() {
+    // 1. Initialize with functional options
+    s := skedulr.New(
+        skedulr.WithMaxWorkers(10),
+        skedulr.WithTaskTimeout(5 * time.Second),
+    )
+    defer s.ShutDown()
 
-```go
-job := func() error {
-	fmt.Println("Do something important")
-	return nil
+    // 2. Submit a one-off task
+    s.Submit(skedulr.NewTask(func(ctx context.Context) error {
+        id := skedulr.TaskID(ctx) // Jobs can access their own Task ID
+        println("Running task:", id)
+        return nil
+    }, 10, 0)) // priority 10, no override timeout
+
+    // 3. Schedule recurring tasks
+    s.ScheduleRecurring(func(ctx context.Context) error {
+        return nil
+    }, 1 * time.Minute, 5) // Run every minute, priority 5
 }
-
-task := schedulr.NewTask(2*time.Second, job, 5) // timeout = 2s, priority = 5
-scheduler.Submit(task)
 ```
 
----
+## 🛠 Features
 
-### Schedule a One-Time Task
+- **Bounded Concurrency**: Workers scale dynamically based on load but Nunca exceed the configured limit.
+- **Priority-Based**: Tasks are executed based on a heap-implemented priority queue.
+- **Middleware Support**: Wrap jobs with cross-cutting concerns (Logging, Recovery, etc.).
+- **Cron Support**: Lightweight parsing for `* * * * *` syntax.
+- **Retry Strategies**: Built-in support for Exponential Backoff.
+- **Zero Polling**: Uses `sync.Cond` for instant task execution with zero idle CPU overhead.
+
+## 🧱 Middleware
 
 ```go
-scheduler.ScheduleOnce(job, time.Now().Add(5*time.Second)) // run after 5 seconds
+sch := skedulr.New()
+sch.Use(skedulr.Recovery(myLogger, func() {
+    // custom logic on panic
+}))
 ```
 
----
+## 🔢 Stats
 
-### Schedule a Recurring Task
-
+Monitor the health of your scheduler in real-time:
 ```go
-id, _ := scheduler.ScheduleRecurring(job, 10*time.Second) // run every 10 seconds
-
-// Cancel it later
-scheduler.Cancel(id)
+stats := s.Stats()
+fmt.Printf("Success: %d, Failures: %d, Queue Depth: %d\n", 
+    stats.SuccessCount, stats.FailureCount, stats.QueueSize)
 ```
 
----
-
-## 🔒 Task Priority
-
-Tasks are executed in order of **highest priority first**.
-If multiple tasks have the same priority, they are executed in the order they were added.
-
----
-
-## 🧪 Testing
-
-```bash
-go test -v ./...
-```
-
-Includes:
-
-- ✅ Task execution
-- ⏳ Timeout handling
-- ⬆️ Priority ordering
-- 🔁 Recurring task scheduling
-- ❌ Task cancellation
+## ⚖️ License
+MIT
+lation
 
 ---
 
 ## 📐 Architecture
 
-```
 +-----------------------------+
 |        Task Scheduler       |
 +-----------------------------+

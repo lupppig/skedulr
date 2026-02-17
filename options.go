@@ -48,3 +48,10 @@ func WithRetryStrategy(rs RetryStrategy) Option {
 		s.retryStrategy = rs
 	}
 }
+
+// WithLogger sets a custom logger for the scheduler.
+func WithLogger(l Logger) Option {
+	return func(s *Scheduler) {
+		s.logger = l
+	}
+}

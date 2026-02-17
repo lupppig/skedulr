@@ -47,6 +47,7 @@ type Job func(ctx context.Context) error
 
 type Scheduler struct {
 	mu             sync.Mutex
+	cond           *sync.Cond
 	queue          taskQueue
 	tasks          map[string]*task
 	jobQueue       chan task
@@ -60,6 +61,7 @@ type Scheduler struct {
 	defaultTimeout time.Duration
 	retryStrategy  RetryStrategy
 	middlewares    []Middleware
+	logger         Logger
 	wg             sync.WaitGroup
 }
 
@@ -90,7 +92,9 @@ func New(opts ...Option) *Scheduler {
 		queue:      make(taskQueue, 0),
 		stop:       make(chan struct{}),
 		maxWorkers: 10, // Default max workers
+		logger:     noopLogger{},
 	}
+	s.cond = sync.NewCond(&s.mu)
 
 	for _, opt := range opts {
 		opt(s)
@@ -104,20 +108,29 @@ func New(opts ...Option) *Scheduler {
 func (s *Scheduler) dequeueLoop() {
 	for {
 		s.mu.Lock()
-		if s.queue.Len() > 0 {
-			t := heap.Pop(&s.queue).(*task)
-			atomic.AddInt64(&s.queueSize, -1)
-			s.mu.Unlock()
-			s.jobQueue <- *t
-			continue
+		for s.queue.Len() == 0 {
+			select {
+			case <-s.stop:
+				s.mu.Unlock()
+				return
+			default:
+				s.cond.Wait()
+			}
 		}
-		s.mu.Unlock()
 
 		select {
 		case <-s.stop:
+			s.mu.Unlock()
 			return
-		case <-time.After(100 * time.Millisecond):
-			// periodically check if no signal is used (Wait/Signal could be better but this is fine for now)
+		default:
+			if s.queue.Len() > 0 {
+				t := heap.Pop(&s.queue).(*task)
+				atomic.AddInt64(&s.queueSize, -1)
+				s.mu.Unlock()
+				s.jobQueue <- *t
+			} else {
+				s.mu.Unlock()
+			}
 		}
 	}
 }
@@ -180,6 +193,18 @@ func (s *Scheduler) worker() {
 	}
 }
 
+type contextKey string
+
+const taskIDKey contextKey = "task_id"
+
+// TaskID returns the task ID associated with the context, if any.
+func TaskID(ctx context.Context) string {
+	if id, ok := ctx.Value(taskIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
 func (s *Scheduler) runTask(t task) {
 	// Individual task timeout or default scheduler timeout
 	delay := t.timeout
@@ -190,10 +215,11 @@ func (s *Scheduler) runTask(t task) {
 	var ctx context.Context
 	var cancel context.CancelFunc
 
+	baseCtx := context.WithValue(context.Background(), taskIDKey, t.id)
 	if delay > 0 {
-		ctx, cancel = context.WithTimeout(context.Background(), delay)
+		ctx, cancel = context.WithTimeout(baseCtx, delay)
 	} else {
-		ctx, cancel = context.WithCancel(context.Background())
+		ctx, cancel = context.WithCancel(baseCtx)
 	}
 	defer cancel()
 
@@ -211,11 +237,13 @@ func (s *Scheduler) runTask(t task) {
 	select {
 	case err := <-done:
 		if err != nil {
+			s.logger.Error("task failed", err, "task_id", t.id)
 			s.handleFailure(t, err)
 		} else {
 			atomic.AddInt64(&s.successCount, 1)
 		}
 	case <-ctx.Done():
+		s.logger.Error("task context cancelled or timed out", ctx.Err(), "task_id", t.id)
 		s.handleFailure(t, ctx.Err())
 	}
 }
@@ -274,6 +302,7 @@ func (s *Scheduler) Submit(t *task) string {
 
 	heap.Push(&s.queue, t)
 	atomic.AddInt64(&s.queueSize, 1)
+	s.cond.Signal()
 	return t.id
 }
 
@@ -367,7 +396,11 @@ func (s *Scheduler) Cancel(id string) error {
 
 // ShutDown gracefully stops the scheduler, waiting for active workers to finish.
 func (s *Scheduler) ShutDown() error {
+	s.mu.Lock()
 	close(s.stop)
+	s.cond.Broadcast()
+	s.mu.Unlock()
+
 	s.wg.Wait()
 
 	s.mu.Lock()

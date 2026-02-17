@@ -132,7 +132,7 @@ func TestRecoveryMiddleware(t *testing.T) {
 	sch := skedulr.New()
 	defer sch.ShutDown()
 
-	sch.Use(skedulr.Recovery(func() {
+	sch.Use(skedulr.Recovery(nil, func() {
 		panicCaught.Store(true)
 	}))
 
@@ -144,6 +144,28 @@ func TestRecoveryMiddleware(t *testing.T) {
 
 	if !panicCaught.Load() {
 		t.Error("panic was not caught by recovery middleware")
+	}
+}
+
+func TestTaskIDPropagation(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown()
+
+	done := make(chan string, 1)
+	task := skedulr.NewTask(func(ctx context.Context) error {
+		done <- skedulr.TaskID(ctx)
+		return nil
+	}, 5, 0)
+
+	id := sch.Submit(task)
+
+	select {
+	case ctxID := <-done:
+		if ctxID != id {
+			t.Errorf("expected task ID %s in context, got %s", id, ctxID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for task")
 	}
 }
 
