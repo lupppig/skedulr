@@ -270,22 +270,14 @@ func (s *Scheduler) spawnWorkers(n int) {
 
 func (s *Scheduler) worker() {
 	defer s.wg.Done()
-	for {
-		select {
-		case t, ok := <-s.jobQueue:
-			if !ok {
-				return
-			}
-			s.mu.Lock()
-			// Update status by pointer in the tracking map if found
-			if trackTask, ok := s.tasks[t.id]; ok {
-				trackTask.status = StatusRunning
-			}
-			s.mu.Unlock()
-			s.runTask(t)
-		case <-s.stop:
-			return
+	for t := range s.jobQueue {
+		s.mu.Lock()
+		// Update status by pointer in the tracking map if found
+		if trackTask, ok := s.tasks[t.id]; ok {
+			trackTask.status = StatusRunning
 		}
+		s.mu.Unlock()
+		s.runTask(t)
 	}
 }
 
@@ -696,6 +688,9 @@ func (s *Scheduler) ShutDown(ctx context.Context) error {
 	s.mu.Lock()
 	close(s.stop)
 	s.cond.Broadcast()
+
+	// Close jobQueue to signal workers to finish and exit
+	close(s.jobQueue)
 	s.mu.Unlock()
 
 	// Wait for workers or timeout
@@ -722,7 +717,6 @@ func (s *Scheduler) ShutDown(ctx context.Context) error {
 			t.cancel()
 		}
 	}
-	close(s.jobQueue)
 	return nil
 }
 
