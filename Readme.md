@@ -8,13 +8,13 @@ Skedulr is a high-performance, concurrent task scheduler for Go, designed for pr
 
 ## Features
 
-- **Dynamic Scaling**: Automatically spins up workers based on task volume and idle-detects to scale down.
+- **Distributed Coordination**: Multi-instance safety using Redis-based "Claims" and "Leases".
+- **Task Dependencies**: Powerful `DependsOn` mechanism for complex execution chains.
+- **Global Cancellation**: Cluster-wide `Cancel(id)` via Redis Pub/Sub.
+- **Backpressure & Bounding**: Enforceable queue limits and unique task keys to prevent overlaps.
 - **Priority Queuing**: Jobs are executed based on user-defined priority levels.
-- **Recursive & Timing**: Support for Cron syntax, one-off delays, and fixed intervals.
-- **Middleware System**: Comes with built-in Recovery and Logging support.
 - **Smart Retries**: Exponential backoff with random jitter to prevent "thundering herds".
-- **Zero-Idle CPU**: Uses sync.Cond for instant reaction times with zero polling overhead.
-- **Context Propagation**: Task IDs are injected into context.Context for easy tracing.
+- **Zero-Idle CPU**: Internal condition variables for instant reaction times with zero polling.
 
 ## Installation
 
@@ -95,8 +95,34 @@ sch.Submit(skedulr.NewPersistentTask("email_worker", []byte("payload"), 10, 0))
 
 - **Registry**: Use WithJob or RegisterJob to map names to code.
 - **Auto-Recovery**: Tasks are reloaded from Redis automatically on New.
-- **Payloads**: Pass state as []byte (JSON/Protobuf compatible).
-- **Graceful Cleanup**: Persistent tasks are deleted from Redis once they reach a terminal state (Success or Max Attempts).
+- **Lease Heartbeat**: Active jobs maintain ownership in Redis to prevent double-execution.
+- **Cleanup Loop**: Automatically recovers orphaned tasks from crashed instances.
+
+### Distributed Cancellation
+Cancellation is global. Calling `Cancel(id)` on any node propagates the command to the instance currently running the task.
+```go
+// Cancels task everywhere in the cluster
+s.Cancel("my-active-task-id")
+```
+
+### Task Dependencies
+Build execution chains where tasks wait for their parents to complete successfully.
+```go
+parentID, _ := s.Submit(skedulr.NewPersistentTask("job_a", nil, 10, 0))
+s.Submit(skedulr.NewPersistentTask("job_b", nil, 5, 0).DependsOn(parentID))
+```
+
+### Throughput & Concurrency Controls
+Prevent memory exhaustion and overlapping tasks.
+```go
+s := skedulr.New(
+    skedulr.WithMaxCapacity(5000), // Return ErrQueueFull when reached
+    skedulr.WithMaxWorkers(5),     // Fixed deterministic pool
+)
+
+// Prevent overlaps for singleton tasks
+s.Submit(skedulr.NewTask(job, 10, 0).WithKey("unique-sync-key"))
+```
 
 ### Smart Retries
 ```go
