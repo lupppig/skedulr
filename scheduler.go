@@ -71,6 +71,9 @@ type Scheduler struct {
 	retryStrategy  RetryStrategy
 	middlewares    []Middleware
 	logger         Logger
+	storage        Storage
+	registry       map[string]Job
+	regMu          sync.RWMutex
 	wg             sync.WaitGroup
 }
 
@@ -114,16 +117,20 @@ type task struct {
 	retryStrategy RetryStrategy
 	attempts      int
 	status        TaskStatus
+	typeName      string
+	payload       []byte
 }
 
 // New creates and starts a new Scheduler with the provided options.
 func New(opts ...Option) *Scheduler {
 	s := &Scheduler{
 		tasks:      make(map[string]*task),
-		jobQueue:   make(chan task, 100),
+		jobQueue:   make(chan task), // Unbuffered for strict priority
 		queue:      make(taskQueue, 0),
 		stop:       make(chan struct{}),
 		maxWorkers: 10, // Default max workers
+		registry:   make(map[string]Job),
+		storage:    &InMemoryStorage{},
 	}
 	s.cond = sync.NewCond(&s.mu)
 
@@ -131,12 +138,59 @@ func New(opts ...Option) *Scheduler {
 		opt(s)
 	}
 
+	s.loadTasks()
+
+	s.wg.Add(2)
 	go s.dequeueLoop()
 	go s.scalingLoop()
 	return s
 }
 
+// RegisterJob registers a job function with a name.
+// This is required for task persistence and recovery.
+func (s *Scheduler) RegisterJob(name string, job Job) {
+	s.regMu.Lock()
+	defer s.regMu.Unlock()
+	s.registry[name] = job
+}
+
+func (s *Scheduler) loadTasks() {
+	tasks, err := s.storage.LoadAll(context.Background())
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("failed to load tasks from storage", err)
+		}
+		return
+	}
+
+	for _, pt := range tasks {
+		s.regMu.RLock()
+		job, ok := s.registry[pt.TypeName]
+		s.regMu.RUnlock()
+
+		if !ok {
+			if s.logger != nil {
+				s.logger.Error("unknown job type on task reload", nil, "type", pt.TypeName, "id", pt.ID)
+			}
+			continue
+		}
+
+		t := &task{
+			id:       pt.ID,
+			job:      job,
+			typeName: pt.TypeName,
+			payload:  pt.Payload,
+			priority: pt.Priority,
+			timeout:  pt.Timeout,
+			attempts: pt.Attempts,
+			status:   StatusQueued,
+		}
+		s.Submit(t)
+	}
+}
+
 func (s *Scheduler) dequeueLoop() {
+	defer s.wg.Done()
 	for {
 		s.mu.Lock()
 		for s.queue.Len() == 0 {
@@ -167,6 +221,7 @@ func (s *Scheduler) dequeueLoop() {
 }
 
 func (s *Scheduler) scalingLoop() {
+	defer s.wg.Done()
 	tick := time.NewTicker(1 * time.Second) // More frequent check
 	defer tick.Stop()
 
@@ -190,6 +245,10 @@ func (s *Scheduler) checkScale() {
 
 	if target > current && current < s.maxWorkers {
 		s.mu.Lock()
+		if atomic.LoadInt32(&s.stopped) == 1 {
+			s.mu.Unlock()
+			return
+		}
 		toSpawn := target - current
 		if toSpawn+current > s.maxWorkers {
 			toSpawn = s.maxWorkers - current
@@ -289,6 +348,9 @@ func (s *Scheduler) runTask(t task) {
 			}
 			s.handleFailure(t, err)
 		} else {
+			if t.typeName != "" {
+				s.storage.Delete(context.Background(), t.id)
+			}
 			atomic.AddInt64(&s.successCount, 1)
 		}
 	case <-ctx.Done():
@@ -300,6 +362,9 @@ func (s *Scheduler) runTask(t task) {
 
 		if s.logger != nil {
 			s.logger.Error("task context cancelled or timed out", ctx.Err(), "task_id", t.id)
+		}
+		if t.typeName != "" {
+			s.storage.Delete(context.Background(), t.id)
 		}
 		s.handleFailure(t, ctx.Err())
 	}
@@ -361,12 +426,27 @@ func (s *Scheduler) Use(mw ...Middleware) {
 }
 
 // NewTask creates a new task instance.
+// NewTask creates a new task with the given job, priority, and optional timeout.
 func NewTask(job Job, priority int, timeout time.Duration) *task {
 	return &task{
 		id:       generateId(),
 		job:      job,
 		priority: priority,
 		timeout:  timeout,
+		status:   StatusQueued,
+	}
+}
+
+// NewPersistentTask creates a task that can be saved to storage.
+// It requires a typeName that has been registered with RegisterJob.
+func NewPersistentTask(typeName string, payload []byte, priority int, timeout time.Duration) *task {
+	return &task{
+		id:       generateId(),
+		typeName: typeName,
+		payload:  payload,
+		priority: priority,
+		timeout:  timeout,
+		status:   StatusQueued,
 	}
 }
 
@@ -385,6 +465,33 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 	}
 
 	t.status = StatusQueued
+
+	// Link job from registry if not provided (for persistent tasks)
+	if t.job == nil && t.typeName != "" {
+		s.regMu.RLock()
+		job, ok := s.registry[t.typeName]
+		s.regMu.RUnlock()
+		if !ok {
+			return "", fmt.Errorf("job type %s not found in registry", t.typeName)
+		}
+		t.job = job
+	}
+
+	// Persist if it's a named job
+	if t.typeName != "" {
+		pt := &PersistentTask{
+			ID:       t.id,
+			TypeName: t.typeName,
+			Payload:  t.payload,
+			Priority: t.priority,
+			Timeout:  t.timeout,
+			Attempts: t.attempts,
+		}
+		if err := s.storage.Save(context.Background(), pt); err != nil {
+			return "", fmt.Errorf("failed to persist task: %w", err)
+		}
+	}
+
 	s.tasks[t.id] = t
 	heap.Push(&s.queue, t)
 	atomic.AddInt64(&s.queueSize, 1)

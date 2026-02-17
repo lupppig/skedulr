@@ -1,28 +1,28 @@
-# 🕒 Skedulr
+# Skedulr
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/lupppig/skedulr.svg)](https://pkg.go.dev/github.com/lupppig/skedulr)
 [![Go Report Card](https://goreportcard.com/status/github.com/lupppig/skedulr)](https://goreportcard.com/report/github.com/lupppig/skedulr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Skedulr** is a high-performance, concurrent task scheduler for Go, designed for production reliability and developer happiness. It features dynamic worker scaling, prioritized execution, retry strategies with jitter, and a powerful middleware system.
+Skedulr is a high-performance, concurrent task scheduler for Go, designed for production reliability and developer efficiency. It features dynamic worker scaling, prioritized execution, retry strategies with jitter, and a powerful middleware system.
 
-## ✨ Features
+## Features
 
-- 🚀 **Dynamic Scaling**: Automatically spins up workers based on task volume and idle-detects to scale down.
-- ⚖️ **Priority Queuing**: Jobs are executed based on user-defined priority levels.
-- 🔄 **Recursive & Timing**: Support for Cron syntax, one-off delays, and fixed intervals.
-- 🛡️ **Middleware System**: Comes with built-in `Recovery` and `Logging` support.
-- 🔁 **Smart Retries**: Exponential backoff with random jitter to prevent "thundering herds".
-- 🚦 **Zero-Idle CPU**: Uses `sync.Cond` for instant reaction times with zero polling overhead.
-- 🆔 **Context Propagation**: Task IDs are injected into `context.Context` for easy tracing.
+- **Dynamic Scaling**: Automatically spins up workers based on task volume and idle-detects to scale down.
+- **Priority Queuing**: Jobs are executed based on user-defined priority levels.
+- **Recursive & Timing**: Support for Cron syntax, one-off delays, and fixed intervals.
+- **Middleware System**: Comes with built-in Recovery and Logging support.
+- **Smart Retries**: Exponential backoff with random jitter to prevent "thundering herds".
+- **Zero-Idle CPU**: Uses sync.Cond for instant reaction times with zero polling overhead.
+- **Context Propagation**: Task IDs are injected into context.Context for easy tracing.
 
-## 📦 Installation
+## Installation
 
 ```bash
 go get github.com/lupppig/skedulr
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ```go
 package main
@@ -60,7 +60,7 @@ func main() {
 }
 ```
 
-## 🛠️ Advanced Usage
+## Advanced Usage
 
 ### Middleware
 Wrap your jobs with global or per-scheduler logic.
@@ -78,6 +78,26 @@ s.ScheduleCron("0 9 * * 1-5", myJob, 10)
 s.ScheduleRecurring(myJob, 30*time.Second, 5)
 ```
 
+### Persistent Storage (Redis)
+
+Skedulr can persist tasks to Redis to survive process restarts. This requires a Job Registry so Skedulr can re-link saved tasks to your code.
+
+```go
+sch := skedulr.New(
+    skedulr.WithRedisStorage("localhost:6379", "", 0),
+    // Register the function name used for persistence
+    skedulr.WithJob("email_worker", myEmailFunc),
+)
+
+// Submit a task that will survive a restart
+sch.Submit(skedulr.NewPersistentTask("email_worker", []byte("payload"), 10, 0))
+```
+
+- **Registry**: Use WithJob or RegisterJob to map names to code.
+- **Auto-Recovery**: Tasks are reloaded from Redis automatically on New.
+- **Payloads**: Pass state as []byte (JSON/Protobuf compatible).
+- **Graceful Cleanup**: Persistent tasks are deleted from Redis once they reach a terminal state (Success or Max Attempts).
+
 ### Smart Retries
 ```go
 skedulr.WithRetryStrategy(&skedulr.ExponentialBackoff{
@@ -87,7 +107,7 @@ skedulr.WithRetryStrategy(&skedulr.ExponentialBackoff{
 })
 ```
 
-## 📊 Monitoring
+## Monitoring
 Query the state of any task or the scheduler itself:
 ```go
 // Get overall stats
@@ -97,5 +117,5 @@ stats := s.Stats() // SuccessCount, FailureCount, QueueSize
 status := s.Status(taskID) // Succeeded, Failed, Running, Queued
 ```
 
-## ⚖️ License
+## License
 MIT License. See [LICENSE](LICENSE) for details.
