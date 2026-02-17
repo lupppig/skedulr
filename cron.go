@@ -31,7 +31,9 @@ func (s *Scheduler) ScheduleCronTask(t *task, spec string) (string, error) {
 	s.tasks[t.id] = t
 	s.mu.Unlock()
 
+	s.loopWg.Add(1)
 	go func() {
+		defer s.loopWg.Done()
 		defer cancel()
 		for {
 			now := time.Now().Truncate(time.Minute)

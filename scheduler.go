@@ -85,6 +85,7 @@ type Scheduler struct {
 	leaseDuration  time.Duration
 	history        []*task
 	historySize    int
+	loopWg         sync.WaitGroup
 }
 
 // TaskStatus represents the current state of a task.
@@ -151,10 +152,10 @@ func New(opts ...Option) *Scheduler {
 
 	s.loadTasks()
 
-	s.wg.Add(1)
+	s.loopWg.Add(1)
 	go s.dequeueLoop()
 
-	s.wg.Add(1)
+	s.loopWg.Add(1)
 	go s.cleanupLoop()
 
 	s.storage.SubscribeCancel(context.Background(), func(id string) {
@@ -221,7 +222,7 @@ func (s *Scheduler) loadTasks() {
 }
 
 func (s *Scheduler) dequeueLoop() {
-	defer s.wg.Done()
+	defer s.loopWg.Done()
 	for {
 		s.mu.Lock()
 		for s.queue.Len() == 0 {
@@ -252,7 +253,7 @@ func (s *Scheduler) dequeueLoop() {
 }
 
 func (s *Scheduler) cleanupLoop() {
-	defer s.wg.Done()
+	defer s.loopWg.Done()
 	ticker := time.NewTicker(s.leaseDuration / 2)
 	defer ticker.Stop()
 
@@ -628,7 +629,9 @@ func (s *Scheduler) ScheduleOnceTask(t *task, at time.Time) (string, error) {
 	delay := time.Until(at)
 	timer := time.NewTimer(delay)
 
+	s.loopWg.Add(1)
 	go func() {
+		defer s.loopWg.Done()
 		defer cancel()
 		select {
 		case <-timer.C:
@@ -663,7 +666,9 @@ func (s *Scheduler) ScheduleRecurringTask(t *task, interval time.Duration) (stri
 	s.tasks[t.id] = t
 	s.mu.Unlock()
 
+	s.loopWg.Add(1)
 	go func() {
+		defer s.loopWg.Done()
 		defer cancel()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -719,8 +724,13 @@ func (s *Scheduler) ShutDown(ctx context.Context) error {
 	s.mu.Lock()
 	close(s.stop)
 	s.cond.Broadcast()
+	s.mu.Unlock()
 
-	// Close jobQueue to signal workers to finish and exit
+	// Wait for background loops to exit before closing jobQueue
+	s.loopWg.Wait()
+
+	// Safe to close jobQueue now
+	s.mu.Lock()
 	close(s.jobQueue)
 	s.mu.Unlock()
 

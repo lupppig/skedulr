@@ -19,8 +19,8 @@ Skedulr is a high-performance, concurrent task scheduler for Go, designed for pr
 ## Installation
 
 ```bash
-# Update to the latest version with Dashboard support
-go get github.com/lupppig/skedulr@v1.0.4
+# Update to the latest version with Custom ID and Shutdown stability
+go get github.com/lupppig/skedulr@v1.0.8
 ```
 
 ## Quick Start
@@ -77,6 +77,12 @@ s.ScheduleCron("0 9 * * 1-5", myJob, 10)
 
 // Every 30 seconds
 s.ScheduleRecurring(myJob, 30*time.Second, 5)
+
+// Use custom IDs for descriptive identification
+s.ScheduleOnceTask(
+    skedulr.NewTask(myJob, 10, 0).WithID("cleanup-logs-daily"), 
+    time.Now().Add(1*time.Hour),
+)
 ```
 
 ### Persistent Storage (Redis)
