@@ -76,7 +76,7 @@ type Storage interface {
 	ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error)
 	Enqueue(ctx context.Context, t *PersistentTask) error
 	Dequeue(ctx context.Context, instanceID string, duration time.Duration) (*PersistentTask, error)
-	AddToHistory(ctx context.Context, t TaskInfo) error
+	AddToHistory(ctx context.Context, t TaskInfo, retention time.Duration) error
 	GetHistory(ctx context.Context, limit int) ([]TaskInfo, error)
 }
 
@@ -103,7 +103,7 @@ func (s *InMemoryStorage) SaveWaiting(ctx context.Context, t *PersistentTask) er
 func (s *InMemoryStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error) {
 	return nil, nil
 }
-func (s *InMemoryStorage) AddToHistory(ctx context.Context, t TaskInfo) error {
+func (s *InMemoryStorage) AddToHistory(ctx context.Context, t TaskInfo, retention time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.history = append([]TaskInfo{t}, s.history...)
@@ -269,15 +269,24 @@ func (s *RedisStorage) SubscribeCancel(ctx context.Context, onCancel func(id str
 	return nil
 }
 
-func (s *RedisStorage) AddToHistory(ctx context.Context, t TaskInfo) error {
+func (s *RedisStorage) AddToHistory(ctx context.Context, t TaskInfo, retention time.Duration) error {
 	data, err := json.Marshal(t)
 	if err != nil {
 		return err
 	}
 	key := s.prefix + "history"
+	now := time.Now().UnixNano()
 	pipe := s.client.Pipeline()
-	pipe.LPush(ctx, key, data)
-	pipe.LTrim(ctx, key, 0, 99) // Keep last 100
+	pipe.ZAdd(ctx, key, redis.Z{
+		Score:  float64(now),
+		Member: data,
+	})
+	if retention > 0 {
+		oldest := time.Now().Add(-retention).UnixNano()
+		pipe.ZRemRangeByScore(ctx, key, "-inf", fmt.Sprintf("%d", oldest))
+	} else {
+		pipe.ZRemRangeByRank(ctx, key, 0, -101)
+	}
 	_, err = pipe.Exec(ctx)
 	return err
 }
@@ -314,7 +323,7 @@ func (s *RedisStorage) Dequeue(ctx context.Context, instanceID string, d time.Du
 
 func (s *RedisStorage) GetHistory(ctx context.Context, limit int) ([]TaskInfo, error) {
 	key := s.prefix + "history"
-	data, err := s.client.LRange(ctx, key, 0, int64(limit-1)).Result()
+	data, err := s.client.ZRevRange(ctx, key, 0, int64(limit-1)).Result()
 	if err != nil {
 		return nil, err
 	}

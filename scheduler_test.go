@@ -452,7 +452,7 @@ func (m *distributedMockStorage) ResolveDependencies(ctx context.Context, parent
 	return ready, nil
 }
 
-func (m *distributedMockStorage) AddToHistory(ctx context.Context, t skedulr.TaskInfo) error {
+func (m *distributedMockStorage) AddToHistory(ctx context.Context, t skedulr.TaskInfo, retention time.Duration) error {
 	return nil
 }
 

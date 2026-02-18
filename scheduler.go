@@ -58,33 +58,34 @@ type Job func(ctx context.Context) error
 // Scheduler manages the concurrent execution of prioritized tasks.
 // It supports dynamic worker scaling, retries, and middleware.
 type Scheduler struct {
-	mu             sync.Mutex
-	cond           *sync.Cond
-	queue          taskQueue
-	tasks          map[string]*task
-	poolQueues     map[string]chan *task
-	poolWorkers    map[string]int
-	stop           chan struct{}
-	stopped        int32 // Atomic flag to prevent new submissions
-	maxWorkers     int
-	currentWorkers int32
-	queueSize      int64 // Atomic tracker for queue size
-	successCount   int64 // Atomic tracker for successful tasks
-	failureCount   int64 // Atomic tracker for failed tasks
-	panicCount     int64 // Atomic tracker for panics caught
-	defaultTimeout time.Duration
-	retryStrategy  RetryStrategy
-	middlewares    []Middleware
-	logger         Logger
-	storage        Storage
-	registry       map[string]Job
-	regMu          sync.RWMutex
-	wg             sync.WaitGroup
-	maxQueueSize   int
-	activeKeys     map[string]struct{}
-	instanceID     string
-	leaseDuration  time.Duration
-	loopWg         sync.WaitGroup
+	mu               sync.Mutex
+	cond             *sync.Cond
+	queue            taskQueue
+	tasks            map[string]*task
+	poolQueues       map[string]chan *task
+	poolWorkers      map[string]int
+	stop             chan struct{}
+	stopped          int32 // Atomic flag to prevent new submissions
+	maxWorkers       int
+	currentWorkers   int32
+	queueSize        int64 // Atomic tracker for queue size
+	successCount     int64 // Atomic tracker for successful tasks
+	failureCount     int64 // Atomic tracker for failed tasks
+	panicCount       int64 // Atomic tracker for panics caught
+	defaultTimeout   time.Duration
+	retryStrategy    RetryStrategy
+	middlewares      []Middleware
+	logger           Logger
+	storage          Storage
+	registry         map[string]Job
+	regMu            sync.RWMutex
+	wg               sync.WaitGroup
+	maxQueueSize     int
+	activeKeys       map[string]struct{}
+	instanceID       string
+	leaseDuration    time.Duration
+	loopWg           sync.WaitGroup
+	historyRetention time.Duration
 }
 
 // TaskStatus represents the current state of a task.
@@ -129,18 +130,19 @@ type task struct {
 // New creates and starts a new Scheduler with the provided options.
 func New(opts ...Option) *Scheduler {
 	s := &Scheduler{
-		tasks:         make(map[string]*task),
-		poolQueues:    make(map[string]chan *task),
-		poolWorkers:   make(map[string]int),
-		queue:         make(taskQueue, 0),
-		stop:          make(chan struct{}),
-		maxWorkers:    5,
-		maxQueueSize:  1000,
-		registry:      make(map[string]Job),
-		storage:       &InMemoryStorage{history: make([]TaskInfo, 0)},
-		activeKeys:    make(map[string]struct{}),
-		instanceID:    generateId(),
-		leaseDuration: 30 * time.Second, // Default lease
+		tasks:            make(map[string]*task),
+		poolQueues:       make(map[string]chan *task),
+		poolWorkers:      make(map[string]int),
+		queue:            make(taskQueue, 0),
+		stop:             make(chan struct{}),
+		maxWorkers:       5,
+		maxQueueSize:     1000,
+		registry:         make(map[string]Job),
+		storage:          &InMemoryStorage{history: make([]TaskInfo, 0)},
+		activeKeys:       make(map[string]struct{}),
+		instanceID:       generateId(),
+		leaseDuration:    30 * time.Second,   // Default lease
+		historyRetention: 7 * 24 * time.Hour, // Default 7 days
 	}
 	s.cond = sync.NewCond(&s.mu)
 
@@ -558,7 +560,7 @@ func (s *Scheduler) recordHistory(t *task) {
 		Progress: t.progress,
 	}
 
-	s.storage.AddToHistory(context.Background(), info)
+	s.storage.AddToHistory(context.Background(), info, s.historyRetention)
 }
 
 // Status returns the current status of a task.

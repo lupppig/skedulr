@@ -118,3 +118,10 @@ func WithLeaseDuration(d time.Duration) Option {
 		}
 	}
 }
+
+// WithHistoryRetention sets the duration for how long task history is kept in Redis.
+func WithHistoryRetention(d time.Duration) Option {
+	return func(s *Scheduler) {
+		s.historyRetention = d
+	}
+}
