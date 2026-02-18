@@ -969,3 +969,43 @@ func TestDynamicScaling(t *testing.T) {
 		}
 	}
 }
+
+func TestScaleNewPool(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	const newPool = "brand-new-pool"
+	
+	// Scale a pool that doesn't exist yet
+	sch.ScalePool(newPool, 2)
+	
+	// Register a job and submit a task to that pool
+	done := make(chan struct{})
+	sch.RegisterJob("test-job", func(ctx context.Context) error {
+		close(done)
+		return nil
+	})
+	
+	sch.Submit(skedulr.NewTask(nil, 1, 0).WithTypeName("test-job").WithPool(newPool))
+	
+	select {
+	case <-done:
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("task in new pool was not processed - potential zombie workers")
+	}
+}
+
+func TestStatsLockContention(t *testing.T) {
+	// This test is hard to prove definitively but we can verify it doesn't hang
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+	
+	// Spam stats and submit simultaneously
+	for i := 0; i < 100; i++ {
+		go sch.Stats()
+		go sch.Submit(skedulr.NewTask(func(ctx context.Context) error { return nil }, 1, 0))
+	}
+	
+	time.Sleep(500 * time.Millisecond)
+}

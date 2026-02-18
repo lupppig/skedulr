@@ -63,19 +63,19 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 		json.NewEncoder(w).Encode(s.StatsWithFilter(filter))
 	}))
 
-	mux.HandleFunc("/api/pause", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/pause", throttle(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			s.Pause()
 			w.WriteHeader(http.StatusOK)
 		}
-	})
+	}))
 
-	mux.HandleFunc("/api/resume", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/resume", throttle(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			s.Resume()
 			w.WriteHeader(http.StatusOK)
 		}
-	})
+	}))
 
 	mux.HandleFunc("/api/cancel", throttle(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -127,10 +127,9 @@ func (s *Scheduler) Stats() Stats {
 // StatsWithFilter returns the current scheduler statistics with custom history filtering.
 func (s *Scheduler) StatsWithFilter(filter HistoryFilter) Stats {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	tasks := make([]TaskInfo, 0, len(s.tasks))
 	for _, t := range s.tasks {
+		// ... existing filtering logic (truncated for readability)
 		if filter.ID != "" && t.id != filter.ID {
 			continue
 		}
@@ -160,8 +159,6 @@ func (s *Scheduler) StatsWithFilter(filter HistoryFilter) Stats {
 		})
 	}
 
-	history, _ := s.storage.GetHistory(context.Background(), filter)
-
 	pools := make([]PoolStats, 0, len(s.poolQueues))
 	for name, ch := range s.poolQueues {
 		pools = append(pools, PoolStats{
@@ -171,17 +168,22 @@ func (s *Scheduler) StatsWithFilter(filter HistoryFilter) Stats {
 		})
 	}
 
-	return Stats{
+	stats := Stats{
 		QueueSize:      atomic.LoadInt64(&s.queueSize),
 		SuccessCount:   atomic.LoadInt64(&s.successCount),
 		FailureCount:   atomic.LoadInt64(&s.failureCount),
 		PanicCount:     atomic.LoadInt64(&s.panicCount),
 		CurrentWorkers: atomic.LoadInt32(&s.currentWorkers),
 		ActiveTasks:    tasks,
-		History:        history,
 		Pools:          pools,
 		IsPaused:       s.IsPaused(),
 	}
+	s.mu.Unlock()
+
+	history, _ := s.storage.GetHistory(context.Background(), filter)
+	stats.History = history
+
+	return stats
 }
 
 // Stats holds scheduler metrics.

@@ -1048,6 +1048,11 @@ func (s *Scheduler) ScalePool(pool string, n int) {
 	s.mu.Lock()
 	current := s.poolWorkers[pool]
 	s.poolWorkers[pool] = n
+
+	// Ensure pool queue exists to avoid zombie workers
+	if _, ok := s.poolQueues[pool]; !ok {
+		s.poolQueues[pool] = make(chan *task)
+	}
 	s.mu.Unlock()
 
 	if n > current {
