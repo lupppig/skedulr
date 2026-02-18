@@ -460,6 +460,14 @@ func (m *distributedMockStorage) GetHistory(ctx context.Context, filter skedulr.
 	return nil, nil
 }
 
+func (m *distributedMockStorage) MarkCancelled(ctx context.Context, id string) error {
+	return nil
+}
+
+func (m *distributedMockStorage) IsCancelled(ctx context.Context, id string) (bool, error) {
+	return false, nil
+}
+
 func (m *distributedMockStorage) Enqueue(ctx context.Context, t *skedulr.PersistentTask) error {
 	return nil
 }

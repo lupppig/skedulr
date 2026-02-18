@@ -86,6 +86,8 @@ type Storage interface {
 	Dequeue(ctx context.Context, instanceID string, duration time.Duration) (*PersistentTask, error)
 	AddToHistory(ctx context.Context, t TaskInfo, retention time.Duration) error
 	GetHistory(ctx context.Context, filter HistoryFilter) ([]TaskInfo, error)
+	MarkCancelled(ctx context.Context, id string) error
+	IsCancelled(ctx context.Context, id string) (bool, error)
 }
 
 // InMemoryStorage is a basic storage implementation used as a fallback.
@@ -145,6 +147,14 @@ func (s *InMemoryStorage) GetHistory(ctx context.Context, filter HistoryFilter) 
 		}
 	}
 	return res, nil
+}
+
+func (s *InMemoryStorage) MarkCancelled(ctx context.Context, id string) error {
+	return nil
+}
+
+func (s *InMemoryStorage) IsCancelled(ctx context.Context, id string) (bool, error) {
+	return false, nil
 }
 
 // RedisStorage implements Storage using Redis.
@@ -339,6 +349,17 @@ func (s *RedisStorage) Dequeue(ctx context.Context, instanceID string, d time.Du
 		return nil, fmt.Errorf("failed to unmarshal task: %w", err)
 	}
 	return &t, nil
+}
+
+func (s *RedisStorage) MarkCancelled(ctx context.Context, id string) error {
+	key := s.prefix + "cancelled:" + id
+	return s.client.Set(ctx, key, "1", 24*time.Hour).Err()
+}
+
+func (s *RedisStorage) IsCancelled(ctx context.Context, id string) (bool, error) {
+	key := s.prefix + "cancelled:" + id
+	n, err := s.client.Exists(ctx, key).Result()
+	return n > 0, err
 }
 
 func (s *RedisStorage) GetHistory(ctx context.Context, filter HistoryFilter) ([]TaskInfo, error) {

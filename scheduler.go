@@ -86,6 +86,7 @@ type Scheduler struct {
 	leaseDuration    time.Duration
 	loopWg           sync.WaitGroup
 	historyRetention time.Duration
+	paused           int32
 }
 
 // TaskStatus represents the current state of a task.
@@ -161,8 +162,11 @@ func New(opts ...Option) *Scheduler {
 	s.storage.SubscribeCancel(context.Background(), func(id string) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if t, ok := s.tasks[id]; ok && t.cancel != nil {
-			t.cancel()
+		if t, ok := s.tasks[id]; ok {
+			t.status = StatusCancelled
+			if t.cancel != nil {
+				t.cancel()
+			}
 		}
 	})
 
@@ -240,6 +244,16 @@ func (s *Scheduler) loadTasks() {
 func (s *Scheduler) dequeueLoop() {
 	defer s.loopWg.Done()
 	for {
+		// Check if scheduler is paused
+		if atomic.LoadInt32(&s.paused) == 1 {
+			select {
+			case <-s.stop:
+				return
+			case <-time.After(100 * time.Millisecond): // Wait a bit before re-checking
+				continue
+			}
+		}
+
 		var t *task
 
 		s.mu.Lock()
@@ -251,7 +265,24 @@ func (s *Scheduler) dequeueLoop() {
 
 		if t == nil {
 			pt, err := s.storage.Dequeue(context.Background(), s.instanceID, s.leaseDuration)
-			if err == nil && pt != nil {
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Error("dequeue failed", err)
+				}
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			if pt == nil {
+				// No task from storage, continue to wait or check in-memory queue again
+				// This `continue` will lead to the select statement below
+			} else {
+				// Check if task was cancelled before dispatching
+				if cancelled, _ := s.storage.IsCancelled(context.Background(), pt.ID); cancelled {
+					s.storage.Delete(context.Background(), pt.ID)
+					continue // Skip this task and try again
+				}
+
 				s.regMu.RLock()
 				job, ok := s.registry[pt.TypeName]
 				s.regMu.RUnlock()
@@ -399,7 +430,6 @@ func ReportProgress(ctx context.Context, percent int) {
 }
 
 func (s *Scheduler) runTask(t *task) {
-	// Individual task timeout or default scheduler timeout
 	delay := t.timeout
 	if delay == 0 {
 		delay = s.defaultTimeout
@@ -407,6 +437,13 @@ func (s *Scheduler) runTask(t *task) {
 
 	var ctx context.Context
 	var cancel context.CancelFunc
+
+	s.mu.Lock()
+	if t, ok := s.tasks[t.id]; !ok || t.status == StatusCancelled {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
 
 	updateProgress := func(p int) {
 		s.mu.Lock()
@@ -428,7 +465,13 @@ func (s *Scheduler) runTask(t *task) {
 
 	s.mu.Lock()
 	if trackTask, ok := s.tasks[t.id]; ok {
+		if trackTask.status == StatusCancelled {
+			s.mu.Unlock()
+			cancel()
+			return
+		}
 		trackTask.cancel = cancel
+		trackTask.status = StatusRunning
 	}
 	s.mu.Unlock()
 
@@ -493,7 +536,6 @@ func (s *Scheduler) runTask(t *task) {
 		} else {
 			if t.typeName != "" {
 				s.storage.Delete(context.Background(), t.id)
-				// Resolve dependencies
 				readyTasks, _ := s.storage.ResolveDependencies(context.Background(), t.id)
 				for _, rt := range readyTasks {
 					job, ok := s.getJob(rt.TypeName)
@@ -519,7 +561,11 @@ func (s *Scheduler) runTask(t *task) {
 	case <-ctx.Done():
 		s.mu.Lock()
 		if trackTask, ok := s.tasks[t.id]; ok {
-			trackTask.status = StatusFailed
+			if ctx.Err() == context.Canceled {
+				trackTask.status = StatusCancelled
+			} else {
+				trackTask.status = StatusFailed
+			}
 		}
 		if t.key != "" {
 			delete(s.activeKeys, t.key)
@@ -824,14 +870,17 @@ func (s *Scheduler) Cancel(id string) error {
 	s.mu.Lock()
 	t, ok := s.tasks[id]
 	if ok {
+		t.status = StatusCancelled
 		if t.cancel != nil {
 			t.cancel()
 		}
-		delete(s.tasks, id)
 	}
 	s.mu.Unlock()
 
-	// Global cancel via storage
+	// Mark as cancelled in storage so it won't be picked up again if re-dequeued or in queue
+	s.storage.MarkCancelled(context.Background(), id)
+
+	// Global cancel via storage for currently running tasks
 	return s.storage.PublishCancel(context.Background(), id)
 }
 
@@ -889,4 +938,19 @@ func (s *Scheduler) getJob(typeName string) (Job, bool) {
 	defer s.regMu.RUnlock()
 	j, ok := s.registry[typeName]
 	return j, ok
+}
+
+// Pause stops the scheduler from dequeuing new tasks.
+func (s *Scheduler) Pause() {
+	atomic.StoreInt32(&s.paused, 1)
+}
+
+// Resume allows the scheduler to resume dequeuing tasks.
+func (s *Scheduler) Resume() {
+	atomic.StoreInt32(&s.paused, 0)
+}
+
+// IsPaused returns true if the scheduler is currently paused.
+func (s *Scheduler) IsPaused() bool {
+	return atomic.LoadInt32(&s.paused) == 1
 }

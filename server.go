@@ -26,6 +26,20 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 		json.NewEncoder(w).Encode(s.StatsWithFilter(filter))
 	})
 
+	mux.HandleFunc("/api/pause", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.Pause()
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+
+	mux.HandleFunc("/api/resume", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			s.Resume()
+			w.WriteHeader(http.StatusOK)
+		}
+	})
+
 	mux.HandleFunc("/api/cancel", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -62,12 +76,22 @@ func (s *Scheduler) StatsWithFilter(filter HistoryFilter) Stats {
 
 	tasks := make([]TaskInfo, 0, len(s.tasks))
 	for _, t := range s.tasks {
+		if filter.ID != "" && t.id != filter.ID {
+			continue
+		}
+		if filter.Type != "" && t.typeName != filter.Type {
+			continue
+		}
+		statusStr := t.status.String()
+		if filter.Status != "" && statusStr != filter.Status {
+			continue
+		}
 		tasks = append(tasks, TaskInfo{
 			ID:       t.id,
 			Key:      t.key,
 			Pool:     t.pool,
 			Type:     t.typeName,
-			Status:   t.status.String(),
+			Status:   statusStr,
 			Priority: t.priority,
 			Progress: t.progress,
 		})
@@ -93,6 +117,7 @@ func (s *Scheduler) StatsWithFilter(filter HistoryFilter) Stats {
 		ActiveTasks:    tasks,
 		History:        history,
 		Pools:          pools,
+		IsPaused:       s.IsPaused(),
 	}
 }
 
@@ -106,6 +131,7 @@ type Stats struct {
 	ActiveTasks    []TaskInfo  `json:"active_tasks"`
 	History        []TaskInfo  `json:"history"`
 	Pools          []PoolStats `json:"pools"`
+	IsPaused       bool        `json:"is_paused"`
 }
 
 // PoolStats holds metrics for a specific worker pool.

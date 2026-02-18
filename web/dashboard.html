@@ -279,9 +279,27 @@
 	<div class="main-content">
 		<header>
 			<h1>System Overview</h1>
-			<div>
-				<span class="live-indicator"></span>
-				<span style="font-size: 0.75rem; color: var(--text-muted)">LIVE UPDATES</span>
+			<div style="display: flex; align-items: center; gap: 1.5rem;">
+				<div id="pause-status" style="display: flex; align-items: center; gap: 0.5rem; display: none;">
+					<span
+						style="width: 8px; height: 8px; background: var(--danger); border-radius: 50%; display: inline-block;"></span>
+					<span style="font-size: 0.75rem; color: var(--danger); font-weight: 700;">PAUSED</span>
+				</div>
+				<button id="pause-btn" onclick="togglePause()" style="
+					background: var(--primary);
+					border: none;
+					color: white;
+					padding: 0.5rem 1rem;
+					border-radius: 8px;
+					cursor: pointer;
+					font-weight: 600;
+					font-size: 0.875rem;
+					transition: all 0.2s;
+				">Pause Scheduler</button>
+				<div>
+					<span class="live-indicator"></span>
+					<span style="font-size: 0.75rem; color: var(--text-muted)">LIVE UPDATES</span>
+				</div>
 			</div>
 		</header>
 
@@ -374,6 +392,20 @@
 			document.getElementById('metric-failure').textContent = stats.failure_count;
 			document.getElementById('metric-workers').textContent = stats.current_workers;
 
+			const pauseBtn = document.getElementById('pause-btn');
+			const pauseStatus = document.getElementById('pause-status');
+			if (stats.is_paused) {
+				pauseBtn.textContent = 'Resume Scheduler';
+				pauseBtn.style.background = 'var(--success)';
+				pauseStatus.style.display = 'flex';
+				window.isPaused = true;
+			} else {
+				pauseBtn.textContent = 'Pause Scheduler';
+				pauseBtn.style.background = 'var(--primary)';
+				pauseStatus.style.display = 'none';
+				window.isPaused = false;
+			}
+
 			const poolList = document.getElementById('pool-list');
 			poolList.innerHTML = '';
 			(stats.pools || []).forEach(pool => {
@@ -393,11 +425,11 @@
 			const allTasks = [...(stats.active_tasks || []), ...(stats.history || [])];
 
 			if (allTasks.length > 0) {
-				// Sort by ID (or you could pass a timestamp if available)
 				allTasks.forEach(task => {
 					const row = document.createElement('tr');
-					const statusClass = `status-${task.status.toLowerCase()}`;
-					const isTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(task.status);
+					const status = task.status || 'Unknown';
+					const statusClass = `status-${status.toLowerCase()}`;
+					const isTerminal = ['Succeeded', 'Failed', 'Cancelled'].includes(status);
 
 					let progressValue = task.progress || 0;
 					let boxColor = 'var(--primary)';
@@ -437,10 +469,11 @@
 							<div style="font-size: 0.7rem; color: var(--text-muted)">Pool: ${task.pool || 'default'}</div>
 						</td>
                         <td>${task.priority}</td>
-                        <td><span class="status-badge ${statusClass}">${task.status}</span></td>
+                        <td><span class="status-badge ${statusClass}">${status}</span></td>
 						<td>${progressHtml}</td>
                         <td>
-                            ${isTerminal ? '-' : `<button class="cancel-btn" onclick="cancelTask('${task.id}')">Cancel</button>`}
+                            ${status === 'Cancelled' ? '<span style="color: var(--text-muted); font-size: 0.75rem; font-weight: 600;">Cancelled</span>' :
+							(isTerminal ? '-' : `<button class="cancel-btn" onclick="cancelTask('${task.id}')">Cancel</button>`)}
                         </td>
                     `;
 					list.appendChild(row);
@@ -451,12 +484,21 @@
 		}
 
 		async function cancelTask(id) {
-			if (!confirm(`Are you sure you want to cancel task ${id}?`)) return;
 			try {
 				await fetch(`/api/cancel?id=${id}`, { method: 'POST' });
 				fetchStats(); // Update immediately
 			} catch (error) {
-				alert('Failed to cancel task');
+				console.error('Failed to cancel task:', error);
+			}
+		}
+
+		async function togglePause() {
+			const endpoint = window.isPaused ? '/api/resume' : '/api/pause';
+			try {
+				await fetch(endpoint, { method: 'POST' });
+				fetchStats();
+			} catch (error) {
+				console.error('Failed to toggle pause:', error);
 			}
 		}
 
