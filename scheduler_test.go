@@ -464,7 +464,7 @@ func (m *distributedMockStorage) Enqueue(ctx context.Context, t *skedulr.Persist
 	return nil
 }
 
-func (m *distributedMockStorage) Dequeue(ctx context.Context) (*skedulr.PersistentTask, error) {
+func (m *distributedMockStorage) Dequeue(ctx context.Context, instanceID string, d time.Duration) (*skedulr.PersistentTask, error) {
 	return nil, nil
 }
 

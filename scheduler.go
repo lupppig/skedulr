@@ -144,9 +144,6 @@ func New(opts ...Option) *Scheduler {
 	}
 	s.cond = sync.NewCond(&s.mu)
 
-	s.instanceID = generateId()
-	s.leaseDuration = 30 * time.Second
-
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -251,31 +248,28 @@ func (s *Scheduler) dequeueLoop() {
 		s.mu.Unlock()
 
 		if t == nil {
-			pt, err := s.storage.Dequeue(context.Background())
+			pt, err := s.storage.Dequeue(context.Background(), s.instanceID, s.leaseDuration)
 			if err == nil && pt != nil {
-				claimed, err := s.storage.Claim(context.Background(), pt.ID, s.instanceID, s.leaseDuration)
-				if err == nil && claimed {
-					s.regMu.RLock()
-					job, ok := s.registry[pt.TypeName]
-					s.regMu.RUnlock()
+				s.regMu.RLock()
+				job, ok := s.registry[pt.TypeName]
+				s.regMu.RUnlock()
 
-					if ok {
-						t = &task{
-							id:       pt.ID,
-							key:      pt.Key,
-							pool:     pt.Pool,
-							job:      job,
-							typeName: pt.TypeName,
-							payload:  pt.Payload,
-							priority: pt.Priority,
-							timeout:  pt.Timeout,
-							attempts: pt.Attempts,
-							status:   StatusQueued,
-						}
-						s.mu.Lock()
-						s.tasks[t.id] = t
-						s.mu.Unlock()
+				if ok {
+					t = &task{
+						id:       pt.ID,
+						key:      pt.Key,
+						pool:     pt.Pool,
+						job:      job,
+						typeName: pt.TypeName,
+						payload:  pt.Payload,
+						priority: pt.Priority,
+						timeout:  pt.Timeout,
+						attempts: pt.Attempts,
+						status:   StatusQueued,
 					}
+					s.mu.Lock()
+					s.tasks[t.id] = t
+					s.mu.Unlock()
 				}
 			}
 		}

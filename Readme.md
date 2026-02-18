@@ -9,7 +9,8 @@ Skedulr is a concurrent task scheduler for Go, built for production environments
 
 - **Real reliability**: Handles retries with exponential backoff and jitter out of the box.
 - **Persistence**: Optionally back your tasks with Redis so they survive app restarts.
-- **Distributed native**: Safely run multiple instances of your app with built-in task claiming and leases.
+- **Distributed native**: Safely run multiple instances of your app with atomic task claiming, leases, and heartbeat protection.
+- **Production Tuned**: Silences external dependency logs (like Redis) by default to keep your production console clean.
 - **Visuals**: Comes with a real-time dashboard so you can actually see what your workers are doing.
 - **Zero-poll engine**: Uses condition variables internally, meaning zero idle CPU usage while still reacting instantly to new tasks.
 

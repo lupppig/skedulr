@@ -15,7 +15,7 @@ type PersistentTask struct {
 	ID            string        `json:"id"`
 	Key           string        `json:"key,omitempty"`
 	Pool          string        `json:"pool,omitempty"`
-	TypeName      string        `json:"type_name"`
+	TypeName      string        `json:"type_name,omitempty"`
 	Payload       []byte        `json:"payload,omitempty"`
 	Priority      int           `json:"priority"`
 	Timeout       time.Duration `json:"timeout"`
@@ -23,6 +23,45 @@ type PersistentTask struct {
 	RetryStrategy string        `json:"retry_strategy,omitempty"`
 	DependsOn     []string      `json:"depends_on,omitempty"`
 }
+
+var (
+	luaHeartbeat = redis.NewScript(`
+		local val = redis.call("GET", KEYS[1])
+		if val == ARGV[1] then
+			return redis.call("EXPIRE", KEYS[1], ARGV[2])
+		else
+			return 0
+		end
+	`)
+
+	luaResolveDeps = redis.NewScript(`
+		local child_ids = redis.call("SMEMBERS", KEYS[1])
+		local ready_tasks = {}
+		for _, child_id in ipairs(child_ids) do
+			local deps_key = ARGV[1] .. child_id .. ":deps_count"
+			local rem = redis.call("DECR", deps_key)
+			if tonumber(rem) == 0 then
+				local task_data = redis.call("GET", ARGV[1] .. child_id)
+				if task_data then
+					table.insert(ready_tasks, task_data)
+					redis.call("DEL", deps_key)
+				end
+			end
+		end
+		redis.call("DEL", KEYS[1])
+		return ready_tasks
+	`)
+
+	luaDequeue = redis.NewScript(`
+		local res = redis.call("ZPOPMAX", KEYS[1])
+		if #res == 0 then return nil end
+		local task_data = res[1]
+		local task = cjson.decode(task_data)
+		local lease_key = ARGV[1] .. task.id .. ":lease"
+		redis.call("SET", lease_key, ARGV[2], "EX", ARGV[3])
+		return task_data
+	`)
+)
 
 // Storage defines the interface for persisting tasks.
 type Storage interface {
@@ -36,7 +75,7 @@ type Storage interface {
 	SaveWaiting(ctx context.Context, t *PersistentTask) error
 	ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error)
 	Enqueue(ctx context.Context, t *PersistentTask) error
-	Dequeue(ctx context.Context) (*PersistentTask, error)
+	Dequeue(ctx context.Context, instanceID string, duration time.Duration) (*PersistentTask, error)
 	AddToHistory(ctx context.Context, t TaskInfo) error
 	GetHistory(ctx context.Context, limit int) ([]TaskInfo, error)
 }
@@ -74,7 +113,9 @@ func (s *InMemoryStorage) AddToHistory(ctx context.Context, t TaskInfo) error {
 	return nil
 }
 func (s *InMemoryStorage) Enqueue(ctx context.Context, t *PersistentTask) error { return nil }
-func (s *InMemoryStorage) Dequeue(ctx context.Context) (*PersistentTask, error) { return nil, nil }
+func (s *InMemoryStorage) Dequeue(ctx context.Context, instanceID string, d time.Duration) (*PersistentTask, error) {
+	return nil, nil
+}
 func (s *InMemoryStorage) GetHistory(ctx context.Context, limit int) ([]TaskInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,6 +135,8 @@ type RedisStorage struct {
 
 // NewRedisStorage creates a new RedisStorage instance.
 func NewRedisStorage(addr, password string, db int, prefix string) *RedisStorage {
+	redis.SetLogger(nil)
+
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     addr,
 		Password: password,
@@ -143,78 +186,59 @@ func (s *RedisStorage) LoadAll(ctx context.Context) ([]*PersistentTask, error) {
 
 func (s *RedisStorage) Claim(ctx context.Context, id, instanceID string, d time.Duration) (bool, error) {
 	leaseKey := s.prefix + id + ":lease"
-	ok, err := s.client.SetNX(ctx, leaseKey, instanceID, d).Result()
+	res, err := s.client.SetArgs(ctx, leaseKey, instanceID, redis.SetArgs{
+		Mode: "NX",
+		TTL:  d,
+	}).Result()
 	if err != nil {
+		if err == redis.Nil {
+			return false, nil
+		}
 		return false, fmt.Errorf("failed to claim task %s: %w", id, err)
 	}
-	return ok, nil
+	return res == "OK", nil
 }
 
 func (s *RedisStorage) Heartbeat(ctx context.Context, id, instanceID string, d time.Duration) error {
 	leaseKey := s.prefix + id + ":lease"
-	// Only update if we still own it
-	val, err := s.client.Get(ctx, leaseKey).Result()
+	res, err := luaHeartbeat.Run(ctx, s.client, []string{leaseKey}, instanceID, int(d.Seconds())).Int()
 	if err != nil {
-		return fmt.Errorf("failed to check lease for %s: %w", id, err)
+		return fmt.Errorf("heartbeat failed for %s: %w", id, err)
 	}
-	if val != instanceID {
-		return fmt.Errorf("lease for %s lost (owned by %s)", id, val)
+	if res == 0 {
+		return fmt.Errorf("lease for %s lost or owned by another instance", id)
 	}
-	return s.client.Expire(ctx, leaseKey, d).Err()
+	return nil
 }
 
 func (s *RedisStorage) SaveWaiting(ctx context.Context, t *PersistentTask) error {
-	// 1. Save the task itself
 	data, err := json.Marshal(t)
 	if err != nil {
 		return err
 	}
 	s.client.Set(ctx, s.prefix+t.ID, data, 0)
 
-	// 2. Map parents -> children
 	for _, parentID := range t.DependsOn {
 		s.client.SAdd(ctx, s.prefix+parentID+":children", t.ID)
 	}
-	// 3. Mark task as waiting (track remaining deps count)
 	s.client.Set(ctx, s.prefix+t.ID+":deps_count", len(t.DependsOn), 0)
 	return nil
 }
 
 func (s *RedisStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error) {
-	// 1. Get all children waiting for this parent
-	childIDs, err := s.client.SInter(ctx, s.prefix+parentID+":children").Result()
-	if err != nil && err != redis.Nil {
-		// Wait, SInter is for intersection. I just want the members.
-	}
-	childIDs, err = s.client.SMembers(ctx, s.prefix+parentID+":children").Result()
+	childrenKey := s.prefix + parentID + ":children"
+	res, err := luaResolveDeps.Run(ctx, s.client, []string{childrenKey}, s.prefix).StringSlice()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to resolve dependencies: %w", err)
 	}
 
-	var readyTasks []*PersistentTask
-	for _, childID := range childIDs {
-		// Decrement dependency count
-		rem, err := s.client.Decr(ctx, s.prefix+childID+":deps_count").Result()
-		if err != nil {
-			continue
-		}
-		if rem == 0 {
-			// All dependencies met!
-			data, err := s.client.Get(ctx, s.prefix+childID).Bytes()
-			if err != nil {
-				continue
-			}
-			var t PersistentTask
-			if err := json.Unmarshal(data, &t); err == nil {
-				readyTasks = append(readyTasks, &t)
-				// Clean up
-				s.client.Del(ctx, s.prefix+childID+":deps_count")
-			}
+	readyTasks := make([]*PersistentTask, 0, len(res))
+	for _, data := range res {
+		var t PersistentTask
+		if err := json.Unmarshal([]byte(data), &t); err == nil {
+			readyTasks = append(readyTasks, &t)
 		}
 	}
-	// Clean up the children set for this parent
-	s.client.Del(ctx, s.prefix+parentID+":children")
-
 	return readyTasks, nil
 }
 
@@ -271,22 +295,19 @@ func (s *RedisStorage) Enqueue(ctx context.Context, t *PersistentTask) error {
 	}).Err()
 }
 
-func (s *RedisStorage) Dequeue(ctx context.Context) (*PersistentTask, error) {
+func (s *RedisStorage) Dequeue(ctx context.Context, instanceID string, d time.Duration) (*PersistentTask, error) {
 	key := s.prefix + "queue"
-	// Pop highest priority task
-	res, err := s.client.ZPopMax(ctx, key).Result()
+	res, err := luaDequeue.Run(ctx, s.client, []string{key}, s.prefix, instanceID, int(d.Seconds())).Result()
 	if err != nil {
 		if err == redis.Nil {
 			return nil, nil
 		}
-		return nil, err
+		return nil, fmt.Errorf("dequeue failed: %w", err)
 	}
-	if len(res) == 0 {
-		return nil, nil
-	}
+
 	var t PersistentTask
-	if err := json.Unmarshal([]byte(res[0].Member.(string)), &t); err != nil {
-		return nil, err
+	if err := json.Unmarshal([]byte(res.(string)), &t); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal task: %w", err)
 	}
 	return &t, nil
 }
