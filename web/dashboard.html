@@ -427,7 +427,12 @@
 				card.innerHTML = `
                     <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">${pool.name}</div>
                     <div style="font-size: 1.25rem; font-weight: 600; margin: 0.25rem 0;">${pool.workers} Workers</div>
-                    <div style="font-size: 0.75rem; color: var(--primary)">Queue: ${pool.queue_size}</div>
+                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem;">
+                        <button onclick="scalePool('${pool.name}', ${pool.workers - 1})" style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); width: 24px; height: 24px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center;">-</button>
+                        <span style="font-size: 0.8125rem; font-weight: 600; min-width: 20px; text-align: center;">${pool.workers}</span>
+                        <button onclick="scalePool('${pool.name}', ${pool.workers + 1})" style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); width: 24px; height: 24px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center;">+</button>
+                    </div>
+                    <div style="font-size: 0.75rem; color: var(--primary); margin-top: 0.5rem;">Queue: ${pool.queue_size}</div>
                 `;
 				poolList.appendChild(card);
 			});
@@ -513,6 +518,28 @@
 			} catch (error) {
 				console.error('Failed to toggle pause:', error);
 			}
+		}
+
+		let scaleTimeout = null;
+		async function scalePool(pool, count) {
+			if (count < 0) count = 0;
+			if (count > 100) count = 100;
+
+			// UI feedback immediately
+			fetchStats();
+
+			if (scaleTimeout) clearTimeout(scaleTimeout);
+			scaleTimeout = setTimeout(async () => {
+				try {
+					const response = await fetch(`/api/scale?pool=${pool}&count=${count}`, { method: 'POST' });
+					if (response.status === 429) {
+						console.warn('Scaling throttled');
+					}
+					fetchStats();
+				} catch (error) {
+					console.error('Failed to scale pool:', error);
+				}
+			}, 300);
 		}
 
 		// Poll every 1 second

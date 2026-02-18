@@ -4,9 +4,11 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 //go:embed web/dashboard.html
@@ -15,7 +17,40 @@ var dashboardHTML []byte
 func (s *Scheduler) DashboardHandler() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+	// Simple rate limiting: 10 requests per second
+	limitChan := make(chan struct{}, 10)
+	for i := 0; i < 10; i++ {
+		limitChan <- struct{}{}
+	}
+
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				select {
+				case limitChan <- struct{}{}:
+				default:
+				}
+			case <-s.stop:
+				return
+			}
+		}
+	}()
+
+	throttle := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-limitChan:
+				next.ServeHTTP(w, r)
+			default:
+				http.Error(w, "Too many requests", http.StatusTooManyRequests)
+			}
+		}
+	}
+
+	mux.HandleFunc("/api/stats", throttle(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		limit := 50
 		filter := HistoryFilter{
@@ -26,7 +61,7 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 			Limit:  limit,
 		}
 		json.NewEncoder(w).Encode(s.StatsWithFilter(filter))
-	})
+	}))
 
 	mux.HandleFunc("/api/pause", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
@@ -42,7 +77,7 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 		}
 	})
 
-	mux.HandleFunc("/api/cancel", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/cancel", throttle(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -54,7 +89,25 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 		}
 		s.Cancel(id)
 		w.WriteHeader(http.StatusOK)
-	})
+	}))
+
+	mux.HandleFunc("/api/scale", throttle(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		pool := r.URL.Query().Get("pool")
+		countStr := r.URL.Query().Get("count")
+		if pool == "" || countStr == "" {
+			http.Error(w, "Missing pool or count", http.StatusBadRequest)
+			return
+		}
+
+		var count int
+		fmt.Sscanf(countStr, "%d", &count)
+		s.ScalePool(pool, count)
+		w.WriteHeader(http.StatusOK)
+	}))
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")

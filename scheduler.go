@@ -88,6 +88,7 @@ type Scheduler struct {
 	historyRetention time.Duration
 	paused           int32
 	recoveryInterval time.Duration
+	poolControl      map[string]chan struct{}
 }
 
 // TaskStatus represents the current state of a task.
@@ -143,6 +144,7 @@ func New(opts ...Option) *Scheduler {
 		registry:         make(map[string]Job),
 		storage:          &InMemoryStorage{history: make([]TaskInfo, 0)},
 		activeKeys:       make(map[string]struct{}),
+		poolControl:      make(map[string]chan struct{}),
 		instanceID:       generateId(),
 		leaseDuration:    30 * time.Second,   // Default lease
 		historyRetention: 7 * 24 * time.Hour, // Default 7 days
@@ -345,7 +347,7 @@ func (s *Scheduler) dispatchTask(t *task) bool {
 		ch = make(chan *task)
 		s.poolQueues[pool] = ch
 		s.poolWorkers[pool] = 1
-		s.spawnWorkersForPool(pool, 1)
+		s.spawnWorkersForPoolLocked(pool, 1)
 	}
 	s.mu.Unlock()
 
@@ -373,6 +375,16 @@ func (s *Scheduler) cleanupLoop() {
 }
 
 func (s *Scheduler) spawnWorkersForPool(pool string, n int) {
+	s.mu.Lock()
+	s.spawnWorkersForPoolLocked(pool, n)
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) spawnWorkersForPoolLocked(pool string, n int) {
+	if _, ok := s.poolControl[pool]; !ok {
+		s.poolControl[pool] = make(chan struct{}, 1000)
+	}
+
 	for i := 0; i < n; i++ {
 		atomic.AddInt32(&s.currentWorkers, 1)
 		s.wg.Add(1)
@@ -384,6 +396,7 @@ func (s *Scheduler) worker(pool string) {
 	defer s.wg.Done()
 	s.mu.Lock()
 	ch := s.poolQueues[pool]
+	control := s.poolControl[pool]
 	s.mu.Unlock()
 
 	for {
@@ -398,6 +411,10 @@ func (s *Scheduler) worker(pool string) {
 			}
 			s.mu.Unlock()
 			s.runTask(t)
+		case <-control:
+			// Graceful scale down
+			atomic.AddInt32(&s.currentWorkers, -1)
+			return
 		case <-s.stop:
 			return
 		}
@@ -1013,6 +1030,40 @@ func (s *Scheduler) recoveryLoop() {
 			}
 		case <-s.stop:
 			return
+		}
+	}
+}
+
+// ScalePool adjusts the number of workers in a specific pool.
+// It will gracefully stop workers if n < current, or spawn new ones if n > current.
+func (s *Scheduler) ScalePool(pool string, n int) {
+	if n < 0 {
+		n = 0
+	}
+	// Safety limit: 100 workers per pool to prevent resource exhaustion
+	if n > 100 {
+		n = 100
+	}
+
+	s.mu.Lock()
+	current := s.poolWorkers[pool]
+	s.poolWorkers[pool] = n
+	s.mu.Unlock()
+
+	if n > current {
+		s.spawnWorkersForPool(pool, n-current)
+	} else if n < current {
+		diff := current - n
+		s.mu.Lock()
+		control, ok := s.poolControl[pool]
+		s.mu.Unlock()
+		if ok {
+			for i := 0; i < diff; i++ {
+				select {
+				case control <- struct{}{}:
+				default:
+				}
+			}
 		}
 	}
 }

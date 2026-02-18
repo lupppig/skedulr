@@ -925,3 +925,47 @@ func TestWorkflowBranching(t *testing.T) {
 		t.Errorf("Not all branches executed: %+v", expected)
 	}
 }
+
+func TestDynamicScaling(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	// Initial size is 5 (default)
+	stats := sch.Stats()
+	var defaultPool skedulr.PoolStats
+	for _, p := range stats.Pools {
+		if p.Name == "default" {
+			defaultPool = p
+			break
+		}
+	}
+	if defaultPool.Workers != 5 {
+		t.Errorf("expected 5 default workers, got %d", defaultPool.Workers)
+	}
+
+	// Scale up to 10
+	sch.ScalePool("default", 10)
+	time.Sleep(100 * time.Millisecond)
+	stats = sch.Stats()
+	for _, p := range stats.Pools {
+		if p.Name == "default" {
+			if p.Workers != 10 {
+				t.Errorf("expected 10 default workers after scale up, got %d", p.Workers)
+			}
+			break
+		}
+	}
+
+	// Scale down to 2
+	sch.ScalePool("default", 2)
+	time.Sleep(200 * time.Millisecond) // Give workers time to exit
+	stats = sch.Stats()
+	for _, p := range stats.Pools {
+		if p.Name == "default" {
+			if p.Workers != 2 {
+				t.Errorf("expected 2 default workers after scale down, got %d", p.Workers)
+			}
+			break
+		}
+	}
+}
