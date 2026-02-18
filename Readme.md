@@ -300,6 +300,8 @@ Tasks that exceed `MaxRetries` become **Dead** and appear in the dashboard for m
 
 Skedulr includes a built-in operations dashboard. Mount it on any HTTP server:
 
+![Skedulr Dashboard](assets/dashboard.png)
+
 ```go
 http.Handle("/skedulr/", s.Dashboard("/skedulr"))
 ```
