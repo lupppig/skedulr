@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	// 1. Initialize scheduler with Redis storage
+	// ─── 1. Create the scheduler ──────────────────────────────────────
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
@@ -22,80 +22,132 @@ func main() {
 
 	s := skedulr.New(
 		skedulr.WithRedisStorage(redisAddr, "", 0),
-		skedulr.WithMaxWorkers(10),
-		skedulr.WithWorkersForPool("critical", 4),
-		skedulr.WithTaskTimeout(10*time.Second),
-		// Global retry strategy for tasks that don't specify one
-		skedulr.WithRetryStrategy(skedulr.NewExponentialBackoff(3, 1*time.Second, 10*time.Second, 0.1)),
+		skedulr.WithMaxWorkers(20),
+		skedulr.WithWorkersForPool("critical", 5),
+		skedulr.WithWorkersForPool("background", 3),
+		skedulr.WithTaskTimeout(30*time.Second),
+		skedulr.WithHistoryRetention(7*24*time.Hour),
+		skedulr.WithRecoveryInterval(30*time.Second),
 	)
 
-	// Add logging middleware
-	s.Use(skedulr.Logging(nil))
+	// ─── 2. Add middleware ────────────────────────────────────────────
+	s.Use(
+		skedulr.Logging(nil),
+		skedulr.Recovery(nil, nil),
+	)
 
-	// 2. Register job types (Required for persistence and recovery)
-	s.RegisterJob("email_send", func(ctx context.Context) error {
-		log.Printf("[Email] Sending notification for task %s...\n", skedulr.TaskID(ctx))
+	// ─── 3. Register job types ────────────────────────────────────────
+
+	s.RegisterJob("send_email", func(ctx context.Context) error {
+		log.Printf("[Email] Sending for task %s", skedulr.TaskID(ctx))
+		time.Sleep(500 * time.Millisecond)
 		return nil
 	})
 
-	s.RegisterJob("data_process", func(ctx context.Context) error {
-		id := skedulr.TaskID(ctx)
-		log.Printf("[Process] Starting data processing for %s...\n", id)
-		time.Sleep(2 * time.Second)
-
-		// Demonstrate task failure
-		if id == "process-fail-1" {
-			return fmt.Errorf("simulated processing error")
+	s.RegisterJob("process_data", func(ctx context.Context) error {
+		log.Printf("[Process] Starting %s", skedulr.TaskID(ctx))
+		for i := 0; i <= 100; i += 20 {
+			skedulr.ReportProgress(ctx, i)
+			time.Sleep(300 * time.Millisecond)
 		}
 		return nil
 	})
 
-	// 3. Setup Dashboard
-	// The dashboard is mounted at /skedulr/
-	http.Handle("/skedulr/", s.Dashboard("/skedulr"))
+	s.RegisterJob("generate_report", func(ctx context.Context) error {
+		log.Println("[Report] Generating PDF...")
+		time.Sleep(1 * time.Second)
+		return nil
+	})
 
+	s.RegisterJob("always_fails", func(ctx context.Context) error {
+		return fmt.Errorf("simulated failure")
+	})
+
+	s.RegisterJob("cleanup", func(ctx context.Context) error {
+		log.Println("[Cleanup] Running failure cleanup...")
+		return nil
+	})
+
+	// ─── 4. Mount the dashboard ───────────────────────────────────────
+	http.Handle("/skedulr/", s.Dashboard("/skedulr"))
 	go func() {
-		log.Println("🚀 Dashboard available at http://localhost:8080/skedulr/")
+		log.Println("Dashboard: http://localhost:8080/skedulr/")
 		if err := http.ListenAndServe(":8080", nil); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
 		}
 	}()
 
-	// 4. Demonstrate Advanced Retry Policies & DLQ
-	log.Println("🔄 Submitting task with MaxRetries (DLQ demo)")
+	// ─── 5. Submit tasks ──────────────────────────────────────────────
 
-	// This task will fail and retry 2 times before becoming DEAD
+	// Basic task with priority
+	s.Submit(skedulr.NewPersistentTask("send_email", nil, 10, 0))
+
+	// Task routed to a specific worker pool
 	s.Submit(
-		skedulr.NewPersistentTask("data_process", nil, 10, 0).
-			WithID("process-fail-1").
-			WithMaxRetries(2).
-			WithRetryStrategy(skedulr.NewLinearRetry(2, 5*time.Second)),
+		skedulr.NewPersistentTask("process_data", []byte(`{"file":"data.csv"}`), 5, 0).
+			WithPool("background"),
 	)
 
-	// 5. Demonstrate Workflows (DAGs)
-	log.Println("🔗 Submitting workflow (Status-based triggers)")
-
-	s.Submit(skedulr.NewPersistentTask("data_process", nil, 5, 0).WithID("base-task"))
-
-	// Runs only on success of base-task
+	// Deduplicated task (same key = only one runs at a time)
 	s.Submit(
-		skedulr.NewPersistentTask("email_send", nil, 5, 0).
+		skedulr.NewPersistentTask("generate_report", nil, 1, 0).
+			WithKey("daily_report"),
+	)
+
+	// ─── 6. Retry policies & dead tasks ───────────────────────────────
+
+	// This task always fails. After 3 retries (linear, 2s apart),
+	// it becomes a Dead task visible in the dashboard for manual resubmission.
+	s.Submit(
+		skedulr.NewPersistentTask("always_fails", nil, 5, 0).
+			WithMaxRetries(3).
+			WithRetryStrategy(skedulr.NewLinearRetry(3, 2*time.Second)),
+	)
+
+	// ─── 7. Workflow DAGs ─────────────────────────────────────────────
+
+	// Parent task
+	s.Submit(
+		skedulr.NewPersistentTask("process_data", nil, 10, 0).
+			WithID("import-job"),
+	)
+
+	// Runs only if "import-job" succeeds
+	s.Submit(
+		skedulr.NewPersistentTask("send_email", nil, 5, 0).
 			WithID("notify-success").
-			OnSuccess("base-task"),
+			OnSuccess("import-job"),
 	)
 
-	// 6. Graceful Shutdown handling
+	// Runs only if "import-job" fails
+	s.Submit(
+		skedulr.NewPersistentTask("cleanup", nil, 5, 0).
+			WithID("failure-cleanup").
+			OnFailure("import-job"),
+	)
+
+	// ─── 8. Scheduled tasks ───────────────────────────────────────────
+
+	// Run once in 5 seconds
+	s.ScheduleOnce(func(ctx context.Context) error {
+		log.Println("[Scheduled] One-time task executed")
+		return nil
+	}, time.Now().Add(5*time.Second), 1)
+
+	// Run every 10 seconds
+	s.ScheduleRecurring(func(ctx context.Context) error {
+		log.Println("[Cron] Recurring health check")
+		return nil
+	}, 10*time.Second, 1)
+
+	// ─── 9. Graceful shutdown ─────────────────────────────────────────
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-
-	log.Println("\nSystem is running. Open the dashboard to see tasks in action.")
-	log.Println("Dead Letter Queue tasks will appear in purple/violet.")
+	log.Println("Running. Press Ctrl+C to stop.")
 	<-stop
 
-	log.Println("\nStopping scheduler cleanly...")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	s.ShutDown(shutdownCtx)
-	log.Println("👋 Finished.")
+	s.ShutDown(ctx)
+	log.Println("Shutdown complete.")
 }

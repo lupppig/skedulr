@@ -71,6 +71,7 @@ type Scheduler struct {
 	queueSize        int64 // Atomic tracker for queue size
 	successCount     int64 // Atomic tracker for successful tasks
 	failureCount     int64 // Atomic tracker for failed tasks
+	deadCount        int64 // Atomic tracker for tasks in DLQ
 	panicCount       int64 // Atomic tracker for panics caught
 	defaultTimeout   time.Duration
 	retryStrategy    RetryStrategy
@@ -466,6 +467,10 @@ func (s *Scheduler) runTask(t *task) {
 
 	s.mu.Lock()
 	if t, ok := s.tasks[t.id]; !ok || t.status == StatusCancelled {
+		if ok && t.status == StatusCancelled {
+			s.recordHistory(t)
+			delete(s.tasks, t.id)
+		}
 		s.mu.Unlock()
 		return
 	}
@@ -577,8 +582,13 @@ func (s *Scheduler) runTask(t *task) {
 			finalStatus = StatusCancelled
 		}
 		if trackTask, ok := s.tasks[t.id]; ok {
+			// Respect explicit cancellation — don't overwrite with Failed
+			if trackTask.status == StatusCancelled {
+				finalStatus = StatusCancelled
+			}
 			trackTask.status = finalStatus
 		}
+		t.status = finalStatus
 		if t.key != "" {
 			delete(s.activeKeys, t.key)
 		}
@@ -591,7 +601,10 @@ func (s *Scheduler) runTask(t *task) {
 			s.storage.CompleteTask(context.Background(), t.id)
 			s.resolveWorkflow(t, finalStatus)
 		}
-		s.handleFailure(t, ctx.Err())
+		// Only retry on actual failures, never on cancellation
+		if finalStatus != StatusCancelled {
+			s.handleFailure(t, ctx.Err())
+		}
 	}
 
 	// For one-off tasks (not identified as recurring), clean up from the tracking map
@@ -600,7 +613,10 @@ func (s *Scheduler) runTask(t *task) {
 	// Record history before removing from active tasks
 	s.mu.Lock()
 	s.recordHistory(t)
-	delete(s.tasks, t.id)
+	// Preserve Dead and Failed tasks in memory so they can be resubmitted via API/Dashboard
+	if t.status != StatusDead && t.status != StatusFailed {
+		delete(s.tasks, t.id)
+	}
 	s.mu.Unlock()
 }
 
@@ -660,6 +676,7 @@ func (s *Scheduler) handleFailure(t *task, err error) {
 	atomic.AddInt64(&s.failureCount, 1)
 
 	if t.maxRetries > 0 && t.attempts >= t.maxRetries {
+		atomic.AddInt64(&s.deadCount, 1)
 		s.mu.Lock()
 		if trackTask, ok := s.tasks[t.id]; ok {
 			trackTask.status = StatusDead
@@ -1125,13 +1142,16 @@ func (s *Scheduler) Resubmit(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("task %s not found", id)
 	}
-	
+
 	if t.status != StatusDead && t.status != StatusFailed {
 		s.mu.Unlock()
 		return fmt.Errorf("task %s is not in a failed or dead state", id)
 	}
 
 	// Reset attempts for a fresh start
+	if t.status == StatusDead {
+		atomic.AddInt64(&s.deadCount, -1)
+	}
 	t.attempts = 0
 	t.status = StatusQueued
 	heap.Push(&s.queue, t)

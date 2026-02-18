@@ -3,30 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/lupppig/skedulr.svg)](https://pkg.go.dev/github.com/lupppig/skedulr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-**Skedulr** is a high-performance, production-grade background task scheduler for Go. 
-It’s built for reliability, horizontal scale, and operational visibility — ensuring your tasks execute correctly even across restarts, crashes, or multiple application instances.
-
----
-
-## Why Skedulr?
-
-### 🛡️ Zero Task Loss
-With Redis-backed persistence and **Reliable Queuing**, tasks are never lost if a worker crashes. Lease-based heartbeats ensure abandoned tasks are automatically recovered.
-
-### 📈 Dynamic Scaling
-Adjust worker pool counts in real-time. Use the built-in dashboard to scale your processing power up or down without restarts.
-
-### 🕸️ Complex Workflows (DAGs)
-Create task chains with conditional triggers:
-- Run `Cleanup` only if `VideoEncode` **fails**.
-- Run `NotifyUser` only if `Payment` **succeeds**.
-
-### 🔄 Advanced Retries & DLQ
-Configurable per-task retry limits. Tasks that exceed their limit are moved to a **Dead Letter Queue (DLQ)** for manual inspection and resubmission.
-
----
-
-## Installation
+A production-grade background task scheduler for Go with Redis persistence, priority queues, retry policies, workflow DAGs, and a real-time operations dashboard.
 
 ```bash
 go get github.com/lupppig/skedulr
@@ -34,93 +11,319 @@ go get github.com/lupppig/skedulr
 
 ---
 
-## Production Setup Example
+## Features
 
-This example demonstrates a full production setup with Redis persistence, multiple worker pools, and a mounted dashboard.
+| Feature | Description |
+|---|---|
+| **Priority Queue** | Tasks execute in priority order using a heap-based queue |
+| **Worker Pools** | Isolate workloads with named pools (`critical`, `background`, etc.) |
+| **Redis Persistence** | Survive restarts — tasks are stored and recovered automatically |
+| **Reliable Queue** | Lease-based heartbeats ensure crashed workers' tasks are recovered |
+| **Retry Policies** | Per-task linear or exponential backoff with configurable limits |
+| **Dead Tasks** | Tasks exceeding retry limits are preserved for inspection and resubmission |
+| **Workflow DAGs** | Chain tasks with `OnSuccess` / `OnFailure` conditional triggers |
+| **Cron Scheduling** | One-shot and recurring task schedules |
+| **Progress Tracking** | Report and display task progress percentage in real-time |
+| **Middleware** | Wrap all tasks with logging, recovery, or custom middleware |
+| **Dashboard** | Built-in web UI for monitoring, filtering, scaling, and managing tasks |
+| **Graceful Shutdown** | Clean shutdown with configurable timeout |
+
+---
+
+## Quick Start
 
 ```go
 package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/lupppig/skedulr"
 )
 
 func main() {
-	// 1. Initialize Scheduler with Redis persistence
+	// Initialize the scheduler
 	s := skedulr.New(
-		skedulr.WithRedisStorage("localhost:6379", "", 0),
-		skedulr.WithMaxWorkers(10), // Base capacity
-		skedulr.WithWorkersForPool("critical", 5), // Dedicated pool
-		skedulr.WithRetryStrategy(skedulr.NewExponentialBackoff(3, 1*time.Second, 10*time.Second, 0.1)),
+		skedulr.WithMaxWorkers(10),
+		skedulr.WithTaskTimeout(30*time.Second),
 	)
 
-	// 2. Register Jobs (Required for Persistence/Recovery)
-	s.RegisterJob("email_sender", func(ctx context.Context) error {
-		// Access task metadata or payload
-		log.Printf("Sending email for task %s...", skedulr.GetTaskID(ctx))
+	// Register a job
+	s.RegisterJob("greet", func(ctx context.Context) error {
+		fmt.Println("Hello from Skedulr!")
 		return nil
 	})
 
-	// 3. Mount the Operations Dashboard
-	http.Handle("/skedulr/", s.Dashboard("/skedulr"))
-	go http.ListenAndServe(":8080", nil)
+	// Submit a task
+	s.Submit(skedulr.NewPersistentTask("greet", nil, 1, 0))
 
-	// 4. Submit Persistent Tasks with Advanced Policies
-	s.Submit(
-		skedulr.NewPersistentTask("email_sender", []byte(`{"to": "user@example.com"}`), 10, 30*time.Second).
-			WithPool("critical").      // Route to dedicated workers
-			WithMaxRetries(5).         // Move to DLQ after 5 failures
-			WithKey("welcome_email_1"). // Prevent duplicate execution
-	)
-
-	// 5. Build a Workflow (DAG)
-	s.Submit(
-		skedulr.NewPersistentTask("cleanup", nil, 1, 0).
-			OnFailure("important-task-id"), // Only runs if parent fails
-	)
-
-	// Block until signal
-	select {}
+	// Graceful shutdown
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	<-stop
+	s.ShutDown(context.Background())
 }
 ```
 
 ---
 
-## Core Concepts
+## Full Example
 
-### Reliable Queueing
-Skedulr uses a "Processing Set" and Lease system. When a worker claims a task, it's moved from the queue to the processing set. If the worker disappears without finishing, another instance will recover the task after the lease expires.
+This example demonstrates every major feature in a single runnable program.
 
-### Dead Letter Queue (DLQ)
-When a task fails more than its `MaxRetries`, it is marked as `Dead`.
-- **Visibility**: The dashboard highlights dead tasks in a specialized view.
-- **Resubmission**: Manually resubmit dead tasks from the dashboard after fixing the underlying issue (e.g., faulty API or DB).
+```go
+package main
 
-### Directed Acyclic Graphs (DAG)
-Submit tasks that depend on others. Trigger conditions include:
-- `OnSuccess(parentID)`
-- `OnFailure(parentID)`
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/lupppig/skedulr"
+)
+
+func main() {
+	// ─── 1. Create the scheduler ──────────────────────────────────────
+	s := skedulr.New(
+		skedulr.WithRedisStorage("localhost:6379", "", 0), // Redis persistence
+		skedulr.WithMaxWorkers(20),                        // Max concurrent workers
+		skedulr.WithWorkersForPool("critical", 5),         // Dedicated pool
+		skedulr.WithWorkersForPool("background", 3),       // Low-priority pool
+		skedulr.WithTaskTimeout(30*time.Second),            // Default timeout
+		skedulr.WithHistoryRetention(7*24*time.Hour),       // Keep 7 days of history
+		skedulr.WithRecoveryInterval(30*time.Second),       // Check for abandoned tasks every 30s
+	)
+
+	// ─── 2. Add middleware ────────────────────────────────────────────
+	s.Use(
+		skedulr.Logging(nil),          // Log task start/finish
+		skedulr.Recovery(nil, nil),     // Catch panics
+	)
+
+	// ─── 3. Register job types ────────────────────────────────────────
+	// Jobs must be registered before submitting persistent tasks.
+	// This is how the scheduler knows what code to run when recovering tasks from Redis.
+
+	s.RegisterJob("send_email", func(ctx context.Context) error {
+		taskID := skedulr.TaskID(ctx)
+		log.Printf("[Email] Sending for task %s", taskID)
+		time.Sleep(500 * time.Millisecond)
+		return nil
+	})
+
+	s.RegisterJob("process_data", func(ctx context.Context) error {
+		taskID := skedulr.TaskID(ctx)
+		log.Printf("[Process] Starting %s", taskID)
+
+		// Report progress to the dashboard
+		for i := 0; i <= 100; i += 20 {
+			skedulr.ReportProgress(ctx, i)
+			time.Sleep(300 * time.Millisecond)
+		}
+		return nil
+	})
+
+	s.RegisterJob("generate_report", func(ctx context.Context) error {
+		log.Println("[Report] Generating PDF...")
+		time.Sleep(1 * time.Second)
+		return nil
+	})
+
+	s.RegisterJob("always_fails", func(ctx context.Context) error {
+		return fmt.Errorf("simulated failure")
+	})
+
+	s.RegisterJob("cleanup", func(ctx context.Context) error {
+		log.Println("[Cleanup] Running failure cleanup...")
+		return nil
+	})
+
+	// ─── 4. Mount the dashboard ───────────────────────────────────────
+	http.Handle("/skedulr/", s.Dashboard("/skedulr"))
+	go func() {
+		log.Println("Dashboard: http://localhost:8080/skedulr/")
+		http.ListenAndServe(":8080", nil)
+	}()
+
+	// ─── 5. Submit tasks ──────────────────────────────────────────────
+
+	// Basic task with priority
+	s.Submit(skedulr.NewPersistentTask("send_email", nil, 10, 0))
+
+	// Task routed to a specific worker pool
+	s.Submit(
+		skedulr.NewPersistentTask("process_data", []byte(`{"file":"data.csv"}`), 5, 0).
+			WithPool("background"),
+	)
+
+	// Deduplicated task (same key = only one runs at a time)
+	s.Submit(
+		skedulr.NewPersistentTask("generate_report", nil, 1, 0).
+			WithKey("daily_report"),
+	)
+
+	// ─── 6. Retry policies & dead tasks ───────────────────────────────
+
+	// This task always fails. After 3 retries (linear, 2s apart),
+	// it becomes a Dead task visible in the dashboard for manual resubmission.
+	s.Submit(
+		skedulr.NewPersistentTask("always_fails", nil, 5, 0).
+			WithMaxRetries(3).
+			WithRetryStrategy(skedulr.NewLinearRetry(3, 2*time.Second)),
+	)
+
+	// ─── 7. Workflow DAGs ─────────────────────────────────────────────
+
+	// Parent task
+	s.Submit(
+		skedulr.NewPersistentTask("process_data", nil, 10, 0).
+			WithID("import-job"),
+	)
+
+	// Runs only if "import-job" succeeds
+	s.Submit(
+		skedulr.NewPersistentTask("send_email", nil, 5, 0).
+			WithID("notify-success").
+			OnSuccess("import-job"),
+	)
+
+	// Runs only if "import-job" fails
+	s.Submit(
+		skedulr.NewPersistentTask("cleanup", nil, 5, 0).
+			WithID("failure-cleanup").
+			OnFailure("import-job"),
+	)
+
+	// ─── 8. Scheduled tasks ───────────────────────────────────────────
+
+	// Run once at a specific time
+	s.ScheduleOnce(func(ctx context.Context) error {
+		log.Println("[Scheduled] One-time task executed")
+		return nil
+	}, time.Now().Add(5*time.Second), 1)
+
+	// Run every 10 seconds
+	s.ScheduleRecurring(func(ctx context.Context) error {
+		log.Println("[Cron] Recurring health check")
+		return nil
+	}, 10*time.Second, 1)
+
+	// ─── 9. Programmatic control ──────────────────────────────────────
+
+	// These are also available via the dashboard API.
+	// s.Pause()                     // Pause task dequeuing
+	// s.Resume()                    // Resume
+	// s.ScalePool("critical", 10)   // Scale a pool at runtime
+	// s.Cancel(taskID)              // Cancel a running or queued task
+	// s.Resubmit(taskID)            // Resubmit a failed/dead task
+
+	// ─── 10. Graceful shutdown ────────────────────────────────────────
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	log.Println("Running. Press Ctrl+C to stop.")
+	<-stop
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.ShutDown(ctx)
+	log.Println("Shutdown complete.")
+}
+```
 
 ---
 
-## Monitoring Dashboard
+## Configuration
 
-Skedulr comes with a premium real-time dashboard. 
-- **Search & Filter**: Find tasks by ID, Type, or Status (Queued, Running, Succeeded, Failed, Dead).
-- **Scale Control**: Live-scale worker pools using sliders.
-- **DLQ Management**: Inspect failures and resubmit dead tasks with one click.
+All options are passed to `skedulr.New()`:
+
+| Option | Description | Default |
+|---|---|---|
+| `WithMaxWorkers(n)` | Max concurrent workers | `5` |
+| `WithInitialWorkers(n)` | Workers to start immediately for the default pool | `0` |
+| `WithWorkersForPool(name, n)` | Dedicated workers for a named pool | — |
+| `WithTaskTimeout(d)` | Default timeout per task | `0` (no timeout) |
+| `WithQueueSize(n)` | Internal dispatch buffer size. Use `0` for strict priority | `0` |
+| `WithMaxCapacity(n)` | Max tasks allowed in the queue | unlimited |
+| `WithRedisStorage(addr, pw, db)` | Enable Redis persistence | in-memory |
+| `WithRetryStrategy(rs)` | Default retry strategy for all tasks | none |
+| `WithLogger(l)` | Custom structured logger | none |
+| `WithInstanceID(id)` | Unique ID for this scheduler instance (multi-instance setups) | auto-generated |
+| `WithLeaseDuration(d)` | Task visibility lease duration | `30s` |
+| `WithHistoryRetention(d)` | How long to keep task history in Redis | `7 days` |
+| `WithRecoveryInterval(d)` | How often to check for abandoned tasks | `1 min` |
 
 ---
 
-## Benchmark & Performance
-Skedulr is designed for high-throughput environments, utilizing Go's concurrency primitives and optimized Lua scripts for Redis operations to minimize network round-trips.
+## Task Builder
+
+Build tasks with a fluent API:
+
+```go
+task := skedulr.NewPersistentTask("job_type", payload, priority, timeout).
+    WithPool("critical").           // Route to a worker pool
+    WithKey("unique_key").          // Deduplicate by key
+    WithID("custom-id").            // Set a custom task ID
+    WithMaxRetries(5).              // Max retry attempts before becoming Dead
+    WithRetryStrategy(              // Per-task retry strategy
+        skedulr.NewExponentialBackoff(5, 1*time.Second, 30*time.Second, 0.1),
+    ).
+    OnSuccess("parent-task-id").    // Run only if parent succeeds
+    OnFailure("other-task-id")      // Run only if parent fails
+```
+
+---
+
+## Retry Strategies
+
+| Strategy | Constructor | Behavior |
+|---|---|---|
+| **Linear** | `NewLinearRetry(maxAttempts, delay)` | Fixed delay between retries |
+| **Exponential** | `NewExponentialBackoff(maxAttempts, base, max, jitter)` | Doubling delay with jitter |
+
+Tasks that exceed `MaxRetries` become **Dead** and appear in the dashboard for manual resubmission via `s.Resubmit(id)`.
+
+---
+
+## Dashboard
+
+Skedulr includes a built-in operations dashboard. Mount it on any HTTP server:
+
+```go
+http.Handle("/skedulr/", s.Dashboard("/skedulr"))
+```
+
+**Capabilities:**
+- Real-time task metrics (queued, running, succeeded, failed, dead)
+- Filter tasks by status using interactive chips, search by ID or job type
+- Scale worker pools up/down with live controls
+- Pause and resume the entire scheduler
+- Cancel running tasks and resubmit dead/failed tasks
+
+**Dashboard API endpoints** (also used by the UI):
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/stats` | GET | Current metrics, active tasks, and history |
+| `/api/cancel?id=` | POST | Cancel a task |
+| `/api/resubmit?id=` | POST | Resubmit a dead or failed task |
+| `/api/pause` | POST | Pause the scheduler |
+| `/api/resume` | POST | Resume the scheduler |
+| `/api/scale?pool=&count=` | POST | Scale a worker pool |
 
 ---
 
 ## License
+
 MIT License.

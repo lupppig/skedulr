@@ -189,6 +189,7 @@ func (s *Scheduler) StatsWithFilter(filter HistoryFilter) Stats {
 		QueueSize:      atomic.LoadInt64(&s.queueSize),
 		SuccessCount:   atomic.LoadInt64(&s.successCount),
 		FailureCount:   atomic.LoadInt64(&s.failureCount),
+		DeadCount:      atomic.LoadInt64(&s.deadCount),
 		PanicCount:     atomic.LoadInt64(&s.panicCount),
 		CurrentWorkers: atomic.LoadInt32(&s.currentWorkers),
 		ActiveTasks:    tasks,
@@ -208,6 +209,7 @@ type Stats struct {
 	QueueSize      int64       `json:"queue_size"`
 	SuccessCount   int64       `json:"success_count"`
 	FailureCount   int64       `json:"failure_count"`
+	DeadCount      int64       `json:"dead_count"`
 	PanicCount     int64       `json:"panic_count"`
 	CurrentWorkers int32       `json:"current_workers"`
 	ActiveTasks    []TaskInfo  `json:"active_tasks"`

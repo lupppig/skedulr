@@ -1062,3 +1062,36 @@ func TestResubmitFromDead(t *testing.T) {
 		t.Log("resubmit on non-dead task failed as expected")
 	}
 }
+
+func TestDeadCount(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	sch.RegisterJob("failing-job", func(ctx context.Context) error {
+		return fmt.Errorf("intentional failure")
+	})
+
+	// Retry once (total 2 attempts: 1st try + 1 retry)
+	tObj := skedulr.NewPersistentTask("failing-job", nil, 1, 0).
+		WithMaxRetries(1).
+		WithRetryStrategy(skedulr.NewLinearRetry(1, 10*time.Millisecond))
+	id, _ := sch.Submit(tObj)
+
+	// Wait for attempts to complete
+	time.Sleep(1 * time.Second)
+
+	stats := sch.Stats()
+	if stats.DeadCount != 1 {
+		t.Errorf("expected 1 dead task, got %d", stats.DeadCount)
+	}
+
+	// Resubmit
+	if err := sch.Resubmit(id); err != nil {
+		t.Errorf("failed to resubmit: %v", err)
+	}
+
+	stats = sch.Stats()
+	if stats.DeadCount != 0 {
+		t.Errorf("expected 0 dead tasks after resubmit, got %d", stats.DeadCount)
+	}
+}
