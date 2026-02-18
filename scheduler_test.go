@@ -456,7 +456,7 @@ func (m *distributedMockStorage) AddToHistory(ctx context.Context, t skedulr.Tas
 	return nil
 }
 
-func (m *distributedMockStorage) GetHistory(ctx context.Context, limit int) ([]skedulr.TaskInfo, error) {
+func (m *distributedMockStorage) GetHistory(ctx context.Context, filter skedulr.HistoryFilter) ([]skedulr.TaskInfo, error) {
 	return nil, nil
 }
 

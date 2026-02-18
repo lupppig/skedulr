@@ -16,7 +16,14 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.Stats())
+		limit := 50
+		filter := HistoryFilter{
+			ID:     r.URL.Query().Get("id"),
+			Type:   r.URL.Query().Get("type"),
+			Status: r.URL.Query().Get("status"),
+			Limit:  limit,
+		}
+		json.NewEncoder(w).Encode(s.StatsWithFilter(filter))
 	})
 
 	mux.HandleFunc("/api/cancel", func(w http.ResponseWriter, r *http.Request) {
@@ -43,8 +50,13 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 	return mux
 }
 
-// Stats returns the current scheduler statistics.
+// Stats returns the current scheduler statistics with default limits.
 func (s *Scheduler) Stats() Stats {
+	return s.StatsWithFilter(HistoryFilter{Limit: 50})
+}
+
+// StatsWithFilter returns the current scheduler statistics with custom history filtering.
+func (s *Scheduler) StatsWithFilter(filter HistoryFilter) Stats {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -61,7 +73,7 @@ func (s *Scheduler) Stats() Stats {
 		})
 	}
 
-	history, _ := s.storage.GetHistory(context.Background(), 50)
+	history, _ := s.storage.GetHistory(context.Background(), filter)
 
 	pools := make([]PoolStats, 0, len(s.poolQueues))
 	for name, ch := range s.poolQueues {

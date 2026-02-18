@@ -317,6 +317,21 @@
 		<div class="content-card">
 			<div class="card-header">
 				<h2>Task Logs & Activity</h2>
+				<div style="display: flex; gap: 0.5rem; align-items: center;">
+					<input type="text" id="filter-id" placeholder="Search ID..."
+						style="background: var(--bg-color); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.4rem; border-radius: 4px; font-size: 0.8rem;">
+					<select id="filter-status"
+						style="background: var(--bg-color); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.4rem; border-radius: 4px; font-size: 0.8rem;">
+						<option value="">All Statuses</option>
+						<option value="Succeeded">Succeeded</option>
+						<option value="Failed">Failed</option>
+						<option value="Running">Running</option>
+						<option value="Queued">Queued</option>
+						<option value="Cancelled">Cancelled</option>
+					</select>
+					<button onclick="fetchStats()"
+						style="background: var(--primary); border: none; color: white; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Filter</button>
+				</div>
 			</div>
 			<table>
 				<thead>
@@ -339,7 +354,13 @@
 	<script>
 		async function fetchStats() {
 			try {
-				const response = await fetch('/api/stats');
+				const id = document.getElementById('filter-id').value;
+				const status = document.getElementById('filter-status').value;
+				const params = new URLSearchParams();
+				if (id) params.append('id', id);
+				if (status) params.append('status', status);
+
+				const response = await fetch(`/api/stats?${params.toString()}`);
 				const stats = await response.json();
 				updateUI(stats);
 			} catch (error) {

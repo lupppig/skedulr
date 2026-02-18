@@ -63,6 +63,14 @@ var (
 	`)
 )
 
+// HistoryFilter defines parameters for searching task history.
+type HistoryFilter struct {
+	ID     string
+	Type   string
+	Status string
+	Limit  int
+}
+
 // Storage defines the interface for persisting tasks.
 type Storage interface {
 	Save(ctx context.Context, t *PersistentTask) error
@@ -77,7 +85,7 @@ type Storage interface {
 	Enqueue(ctx context.Context, t *PersistentTask) error
 	Dequeue(ctx context.Context, instanceID string, duration time.Duration) (*PersistentTask, error)
 	AddToHistory(ctx context.Context, t TaskInfo, retention time.Duration) error
-	GetHistory(ctx context.Context, limit int) ([]TaskInfo, error)
+	GetHistory(ctx context.Context, filter HistoryFilter) ([]TaskInfo, error)
 }
 
 // InMemoryStorage is a basic storage implementation used as a fallback.
@@ -116,14 +124,26 @@ func (s *InMemoryStorage) Enqueue(ctx context.Context, t *PersistentTask) error 
 func (s *InMemoryStorage) Dequeue(ctx context.Context, instanceID string, d time.Duration) (*PersistentTask, error) {
 	return nil, nil
 }
-func (s *InMemoryStorage) GetHistory(ctx context.Context, limit int) ([]TaskInfo, error) {
+func (s *InMemoryStorage) GetHistory(ctx context.Context, filter HistoryFilter) ([]TaskInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if limit > len(s.history) {
-		limit = len(s.history)
+
+	res := make([]TaskInfo, 0)
+	for _, t := range s.history {
+		if filter.ID != "" && t.ID != filter.ID {
+			continue
+		}
+		if filter.Type != "" && t.Type != filter.Type {
+			continue
+		}
+		if filter.Status != "" && t.Status != filter.Status {
+			continue
+		}
+		res = append(res, t)
+		if filter.Limit > 0 && len(res) >= filter.Limit {
+			break
+		}
 	}
-	res := make([]TaskInfo, limit)
-	copy(res, s.history[:limit])
 	return res, nil
 }
 
@@ -321,17 +341,39 @@ func (s *RedisStorage) Dequeue(ctx context.Context, instanceID string, d time.Du
 	return &t, nil
 }
 
-func (s *RedisStorage) GetHistory(ctx context.Context, limit int) ([]TaskInfo, error) {
+func (s *RedisStorage) GetHistory(ctx context.Context, filter HistoryFilter) ([]TaskInfo, error) {
 	key := s.prefix + "history"
-	data, err := s.client.ZRevRange(ctx, key, 0, int64(limit-1)).Result()
+	// Fetch a larger batch to allow for filtering
+	fetchLimit := filter.Limit
+	if fetchLimit <= 0 {
+		fetchLimit = 100
+	}
+	if filter.Type != "" || filter.Status != "" || filter.ID != "" {
+		fetchLimit = 500 // Fetch more if we are filtering
+	}
+
+	data, err := s.client.ZRevRange(ctx, key, 0, int64(fetchLimit-1)).Result()
 	if err != nil {
 		return nil, err
 	}
-	history := make([]TaskInfo, 0, len(data))
+
+	history := make([]TaskInfo, 0)
 	for _, d := range data {
 		var t TaskInfo
 		if err := json.Unmarshal([]byte(d), &t); err == nil {
+			if filter.ID != "" && t.ID != filter.ID {
+				continue
+			}
+			if filter.Type != "" && t.Type != filter.Type {
+				continue
+			}
+			if filter.Status != "" && t.Status != filter.Status {
+				continue
+			}
 			history = append(history, t)
+			if filter.Limit > 0 && len(history) >= filter.Limit {
+				break
+			}
 		}
 	}
 	return history, nil
