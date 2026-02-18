@@ -30,6 +30,61 @@ go get github.com/lupppig/skedulr
 
 ---
 
+## How It Works
+
+### Task Lifecycle
+
+```mermaid
+flowchart LR
+    Submit["Submit Task"] --> PQ["Priority Queue"]
+    PQ --> Worker["Worker Pool"]
+    Worker --> Success["✅ Succeeded"]
+    Worker --> Fail{"Failed?"}
+    Fail -->|"Retries left"| Retry["⏳ Retry w/ Backoff"]
+    Retry --> PQ
+    Fail -->|"Max retries exceeded"| Dead["💀 Dead Task"]
+    Dead -->|"Manual Resubmit"| PQ
+    Worker --> Cancel["🚫 Cancelled"]
+
+    style Submit fill:#3b82f6,color:#fff
+    style PQ fill:#6366f1,color:#fff
+    style Worker fill:#8b5cf6,color:#fff
+    style Success fill:#10b981,color:#fff
+    style Fail fill:#f59e0b,color:#000
+    style Retry fill:#f59e0b,color:#000
+    style Dead fill:#7c3aed,color:#fff
+    style Cancel fill:#64748b,color:#fff
+```
+
+### Workflow DAGs
+
+Tasks can depend on the outcome of other tasks using `OnSuccess` and `OnFailure` triggers:
+
+```mermaid
+flowchart TD
+    A["📦 Import Data"] -->|OnSuccess| B["📧 Send Notification"]
+    A -->|OnFailure| C["🧹 Run Cleanup"]
+    B -->|OnSuccess| D["📊 Generate Report"]
+
+    style A fill:#3b82f6,color:#fff
+    style B fill:#10b981,color:#fff
+    style C fill:#ef4444,color:#fff
+    style D fill:#6366f1,color:#fff
+```
+
+```go
+// Parent task
+s.Submit(skedulr.NewPersistentTask("import", nil, 10, 0).WithID("import-job"))
+
+// Runs only if import succeeds
+s.Submit(skedulr.NewPersistentTask("notify", nil, 5, 0).OnSuccess("import-job"))
+
+// Runs only if import fails
+s.Submit(skedulr.NewPersistentTask("cleanup", nil, 5, 0).OnFailure("import-job"))
+```
+
+---
+
 ## Quick Start
 
 ```go
