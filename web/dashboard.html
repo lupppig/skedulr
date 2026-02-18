@@ -336,10 +336,18 @@
 			<div class="card-header">
 				<h2>Task Logs & Activity</h2>
 				<div style="display: flex; gap: 0.5rem; align-items: center;">
-					<input type="text" id="filter-id" placeholder="Search ID..."
-						style="background: var(--bg-color); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.4rem; border-radius: 4px; font-size: 0.8rem;">
+					<input type="text" id="filter-query" placeholder="Global Search..."
+						style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.5rem 0.75rem; border-radius: 8px; font-size: 0.8125rem; width: 220px; outline: none; transition: border-color 0.2s;"
+						onfocus="this.style.borderColor='var(--primary)'"
+						onblur="this.style.borderColor='var(--border-color)'">
+					<input type="text" id="filter-type" placeholder="Type..."
+						style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.5rem 0.75rem; border-radius: 8px; font-size: 0.8125rem; width: 120px; outline: none; transition: border-color 0.2s;"
+						onfocus="this.style.borderColor='var(--primary)'"
+						onblur="this.style.borderColor='var(--border-color)'">
 					<select id="filter-status"
-						style="background: var(--bg-color); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.4rem; border-radius: 4px; font-size: 0.8rem;">
+						style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.5rem 2rem 0.5rem 0.75rem; border-radius: 8px; font-size: 0.8125rem; cursor: pointer; outline: none; appearance: none; background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%2394a3b8%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E'); background-repeat: no-repeat; background-position: right 0.7rem top 50%; background-size: 0.65rem auto; transition: border-color 0.2s;"
+						onfocus="this.style.borderColor='var(--primary)'"
+						onblur="this.style.borderColor='var(--border-color)'">
 						<option value="">All Statuses</option>
 						<option value="Succeeded">Succeeded</option>
 						<option value="Failed">Failed</option>
@@ -348,7 +356,10 @@
 						<option value="Cancelled">Cancelled</option>
 					</select>
 					<button onclick="fetchStats()"
-						style="background: var(--primary); border: none; color: white; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">Filter</button>
+						style="background: var(--primary); border: none; color: white; padding: 0.5rem 1.25rem; border-radius: 8px; cursor: pointer; font-size: 0.8125rem; font-weight: 600; transition: all 0.2s; box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.2);"
+						onmouseover="this.style.transform='translateY(-1px)'; this.style.boxShadow='0 6px 8px -1px rgba(59, 130, 246, 0.3)'"
+						onmouseout="this.style.transform='none'; this.style.boxShadow='0 4px 6px -1px rgba(59, 130, 246, 0.2)'">Apply
+						Filters</button>
 				</div>
 			</div>
 			<table>
@@ -372,10 +383,12 @@
 	<script>
 		async function fetchStats() {
 			try {
-				const id = document.getElementById('filter-id').value;
+				const query = document.getElementById('filter-query').value;
+				const type = document.getElementById('filter-type').value;
 				const status = document.getElementById('filter-status').value;
 				const params = new URLSearchParams();
-				if (id) params.append('id', id);
+				if (query) params.append('q', query);
+				if (type) params.append('type', type);
 				if (status) params.append('status', status);
 
 				const response = await fetch(`/api/stats?${params.toString()}`);

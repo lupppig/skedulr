@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +102,7 @@ type HistoryFilter struct {
 	ID     string
 	Type   string
 	Status string
+	Query  string
 	Limit  int
 }
 
@@ -438,7 +440,7 @@ func (s *RedisStorage) GetHistory(ctx context.Context, filter HistoryFilter) ([]
 	if fetchLimit <= 0 {
 		fetchLimit = 100
 	}
-	if filter.Type != "" || filter.Status != "" || filter.ID != "" {
+	if filter.Type != "" || filter.Status != "" || filter.ID != "" || filter.Query != "" {
 		fetchLimit = 500 // Fetch more if we are filtering
 	}
 
@@ -448,6 +450,8 @@ func (s *RedisStorage) GetHistory(ctx context.Context, filter HistoryFilter) ([]
 	}
 
 	history := make([]TaskInfo, 0)
+	query := strings.ToLower(filter.Query)
+
 	for _, d := range data {
 		var t TaskInfo
 		if err := json.Unmarshal([]byte(d), &t); err == nil {
@@ -459,6 +463,13 @@ func (s *RedisStorage) GetHistory(ctx context.Context, filter HistoryFilter) ([]
 			}
 			if filter.Status != "" && t.Status != filter.Status {
 				continue
+			}
+			if query != "" {
+				match := strings.Contains(strings.ToLower(t.ID), query) ||
+					strings.Contains(strings.ToLower(t.Type), query)
+				if !match {
+					continue
+				}
 			}
 			history = append(history, t)
 			if filter.Limit > 0 && len(history) >= filter.Limit {

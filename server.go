@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -21,6 +22,7 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 			ID:     r.URL.Query().Get("id"),
 			Type:   r.URL.Query().Get("type"),
 			Status: r.URL.Query().Get("status"),
+			Query:  r.URL.Query().Get("q"),
 			Limit:  limit,
 		}
 		json.NewEncoder(w).Encode(s.StatsWithFilter(filter))
@@ -85,6 +87,14 @@ func (s *Scheduler) StatsWithFilter(filter HistoryFilter) Stats {
 		statusStr := t.status.String()
 		if filter.Status != "" && statusStr != filter.Status {
 			continue
+		}
+		if filter.Query != "" {
+			q := strings.ToLower(filter.Query)
+			match := strings.Contains(strings.ToLower(t.id), q) ||
+				strings.Contains(strings.ToLower(t.typeName), q)
+			if !match {
+				continue
+			}
 		}
 		tasks = append(tasks, TaskInfo{
 			ID:       t.id,
