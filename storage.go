@@ -27,6 +27,7 @@ type PersistentTask struct {
 	Priority      int              `json:"priority"`
 	Timeout       time.Duration    `json:"timeout"`
 	Attempts      int              `json:"attempts"`
+	MaxRetries    int              `json:"max_retries"`
 	RetryStrategy string           `json:"retry_strategy,omitempty"`
 	DependsOn     []string         `json:"depends_on,omitempty"` // Legacy support
 	Dependencies  []TaskDependency `json:"dependencies,omitempty"`

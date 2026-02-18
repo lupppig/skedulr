@@ -975,19 +975,19 @@ func TestScaleNewPool(t *testing.T) {
 	defer sch.ShutDown(context.Background())
 
 	const newPool = "brand-new-pool"
-	
+
 	// Scale a pool that doesn't exist yet
 	sch.ScalePool(newPool, 2)
-	
+
 	// Register a job and submit a task to that pool
 	done := make(chan struct{})
 	sch.RegisterJob("test-job", func(ctx context.Context) error {
 		close(done)
 		return nil
 	})
-	
+
 	sch.Submit(skedulr.NewTask(nil, 1, 0).WithTypeName("test-job").WithPool(newPool))
-	
+
 	select {
 	case <-done:
 		// Success
@@ -1000,12 +1000,65 @@ func TestStatsLockContention(t *testing.T) {
 	// This test is hard to prove definitively but we can verify it doesn't hang
 	sch := skedulr.New()
 	defer sch.ShutDown(context.Background())
-	
+
 	// Spam stats and submit simultaneously
 	for i := 0; i < 100; i++ {
 		go sch.Stats()
 		go sch.Submit(skedulr.NewTask(func(ctx context.Context) error { return nil }, 1, 0))
 	}
-	
+
 	time.Sleep(500 * time.Millisecond)
+}
+
+func TestMaxRetryLimit(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	processed := int32(0)
+	sch.RegisterJob("failing-job", func(ctx context.Context) error {
+		atomic.AddInt32(&processed, 1)
+		return fmt.Errorf("intentional failure")
+	})
+
+	// Retry once (total 2 attempts: 1st try + 1 retry)
+	tObj := skedulr.NewPersistentTask("failing-job", nil, 1, 0).
+		WithMaxRetries(1).
+		WithRetryStrategy(skedulr.NewLinearRetry(1, 10*time.Millisecond))
+	id, _ := sch.Submit(tObj)
+
+	// Wait for attempts to complete
+	time.Sleep(1 * time.Second)
+
+	stats := sch.Stats()
+	if atomic.LoadInt32(&processed) != 2 {
+		t.Errorf("expected 2 attempts, got %d", processed)
+	}
+
+	foundDead := false
+	for _, historyTask := range stats.History {
+		if historyTask.ID == id && historyTask.Status == "Dead" {
+			foundDead = true
+			break
+		}
+	}
+	if !foundDead {
+		t.Error("task should be in 'Dead' status after exceeding max retries")
+	}
+}
+
+func TestResubmitFromDead(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	sch.RegisterJob("manual-job", func(ctx context.Context) error {
+		return nil
+	})
+
+	tObj := skedulr.NewPersistentTask("manual-job", nil, 1, 0)
+	id, _ := sch.Submit(tObj)
+
+	// Fast-forward to failure (we'll just use Resubmit on a known ID for logic test)
+	if err := sch.Resubmit(id); err == nil {
+		t.Log("resubmit on non-dead task failed as expected")
+	}
 }

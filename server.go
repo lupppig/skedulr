@@ -91,6 +91,23 @@ func (s *Scheduler) DashboardHandler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 	}))
 
+	mux.HandleFunc("/api/resubmit", throttle(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		id := r.URL.Query().Get("id")
+		if id == "" {
+			http.Error(w, "Missing id", http.StatusBadRequest)
+			return
+		}
+		if err := s.Resubmit(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
 	mux.HandleFunc("/api/scale", throttle(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -215,4 +232,14 @@ type TaskInfo struct {
 	Status   string `json:"status"`
 	Priority int    `json:"priority"`
 	Progress int    `json:"progress"`
+}
+
+// Dashboard returns an http.Handler that serves the operations dashboard.
+// It automatically handles the prefixing for API calls and static assets.
+func (s *Scheduler) Dashboard(prefix string) http.Handler {
+	handler := s.DashboardHandler()
+	if prefix == "" || prefix == "/" {
+		return handler
+	}
+	return http.StripPrefix(strings.TrimSuffix(prefix, "/"), handler)
 }

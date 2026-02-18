@@ -44,3 +44,32 @@ func (e *ExponentialBackoff) NextDelay(attempt int) (time.Duration, bool) {
 
 	return delay, true
 }
+
+// LinearRetry implements a simple retry strategy with a fixed delay.
+type LinearRetry struct {
+	MaxAttempts int
+	Delay       time.Duration
+}
+
+// NextDelay returns the fixed delay.
+func (l *LinearRetry) NextDelay(attempt int) (time.Duration, bool) {
+	if attempt >= l.MaxAttempts {
+		return 0, false
+	}
+	return l.Delay, true
+}
+
+// NewLinearRetry creates a new linear retry strategy.
+func NewLinearRetry(maxAttempts int, delay time.Duration) *LinearRetry {
+	return &LinearRetry{MaxAttempts: maxAttempts, Delay: delay}
+}
+
+// NewExponentialBackoff creates a new exponential backoff strategy.
+func NewExponentialBackoff(maxAttempts int, baseDelay, maxDelay time.Duration, jitter float64) *ExponentialBackoff {
+	return &ExponentialBackoff{
+		MaxAttempts: maxAttempts,
+		BaseDelay:   baseDelay,
+		MaxDelay:    maxDelay,
+		Jitter:      jitter,
+	}
+}

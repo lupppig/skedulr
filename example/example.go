@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,8 +14,7 @@ import (
 )
 
 func main() {
-	// 1. Setup the Scheduler
-	// We use Redis for persistence so tasks survive restarts.
+	// 1. Initialize scheduler with Redis storage
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
@@ -23,90 +23,79 @@ func main() {
 	s := skedulr.New(
 		skedulr.WithRedisStorage(redisAddr, "", 0),
 		skedulr.WithMaxWorkers(10),
-		skedulr.WithWorkersForPool("critical", 2), // Reserved workers for high-priority stuff
+		skedulr.WithWorkersForPool("critical", 4),
+		skedulr.WithTaskTimeout(10*time.Second),
+		// Global retry strategy for tasks that don't specify one
+		skedulr.WithRetryStrategy(skedulr.NewExponentialBackoff(3, 1*time.Second, 10*time.Second, 0.1)),
 	)
 
-	// Add logging so we can see what's happening in the console
+	// Add logging middleware
 	s.Use(skedulr.Logging(nil))
 
-	// 2. Register "Job Types"
-	// This tells the scheduler how to run tasks saved in Redis.
-	s.RegisterJob("email_notify", func(ctx context.Context) error {
-		fmt.Printf("[Email] 📧 Sending update to user for task: %s\n", skedulr.TaskID(ctx))
+	// 2. Register job types (Required for persistence and recovery)
+	s.RegisterJob("email_send", func(ctx context.Context) error {
+		log.Printf("[Email] Sending notification for task %s...\n", skedulr.TaskID(ctx))
 		return nil
 	})
 
-	s.RegisterJob("data_crunch", func(ctx context.Context) error {
+	s.RegisterJob("data_process", func(ctx context.Context) error {
 		id := skedulr.TaskID(ctx)
-		fmt.Printf("[Crunch] 🔢 Processing numbers for %s...\n", id)
+		log.Printf("[Process] Starting data processing for %s...\n", id)
 		time.Sleep(2 * time.Second)
 
-		// We'll make this specific task fail to show error handling
-		if id == "crunch-fail" {
-			return fmt.Errorf("database timeout")
+		// Demonstrate task failure
+		if id == "process-fail-1" {
+			return fmt.Errorf("simulated processing error")
 		}
 		return nil
 	})
 
-	s.RegisterJob("cleanup_retry", func(ctx context.Context) error {
-		fmt.Printf("[Recovery] 🛠️ Parent task failed! Running cleanup for: %s\n", skedulr.TaskID(ctx))
-		return nil
-	})
+	// 3. Setup Dashboard
+	// The dashboard is mounted at /skedulr/
+	http.Handle("/skedulr/", s.Dashboard("/skedulr"))
 
-	// 3. Start the Dashboard
-	// You can see everything at http://localhost:8080
 	go func() {
-		fmt.Println("🚀 Dashboard is live at http://localhost:8080")
-		http.ListenAndServe(":8080", s.DashboardHandler())
+		log.Println("🚀 Dashboard available at http://localhost:8080/skedulr/")
+		if err := http.ListenAndServe(":8080", nil); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server error: %v", err)
+		}
 	}()
 
-	// 4. SHOWCASE: Advanced Workflows (DAGs)
-	fmt.Println("\n--- Starting Workflows ---")
+	// 4. Demonstrate Advanced Retry Policies & DLQ
+	log.Println("🔄 Submitting task with MaxRetries (DLQ demo)")
 
-	// CASE A: Success Path
-	// 'Success-Child' will ONLY run if 'Main-Task' finishes without errors.
-	s.Submit(skedulr.NewTask(nil, 1, 0).WithID("Main-Task").WithTypeName("data_crunch"))
-	s.Submit(skedulr.NewTask(nil, 1, 0).WithID("Success-Child").WithTypeName("email_notify").OnSuccess("Main-Task"))
-
-	// CASE B: Failure Path (Error Handling)
-	// 'Recovery-Task' will ONLY run if 'crunch-fail' errors out.
-	s.Submit(skedulr.NewTask(nil, 1, 0).WithID("crunch-fail").WithTypeName("data_crunch"))
-	s.Submit(skedulr.NewTask(nil, 1, 0).WithID("Recovery-Task").WithTypeName("cleanup_retry").OnFailure("crunch-fail"))
-
-	// 5. SHOWCASE: Other Features
-
-	// Singleton Tasks: Only one "Weekly-Report" can run at a time.
-	fmt.Println("🔑 Submitting singleton task (keys prevent overlap)")
-	s.Submit(skedulr.NewTask(func(ctx context.Context) error {
-		fmt.Println("[Key] Running a unique task...")
-		time.Sleep(3 * time.Second)
-		return nil
-	}, 10, 0).WithKey("unique-gen-report"))
-
-	// Worker Pools: High priority task in a specific pool.
-	fmt.Println("🏊 Submitting task to 'critical' worker pool")
-	s.Submit(skedulr.NewTask(func(ctx context.Context) error {
-		fmt.Println("[Critical] High priority work finished!")
-		return nil
-	}, 100, 0).WithPool("critical"))
-
-	// Cron/Recurring: Run every 30 seconds.
-	s.ScheduleRecurringTask(
-		skedulr.NewTask(func(ctx context.Context) error {
-			fmt.Println("💓 Pulse check...")
-			return nil
-		}, 1, 0),
-		30*time.Second,
+	// This task will fail and retry 2 times before becoming DEAD
+	s.Submit(
+		skedulr.NewPersistentTask("data_process", nil, 10, 0).
+			WithID("process-fail-1").
+			WithMaxRetries(2).
+			WithRetryStrategy(skedulr.NewLinearRetry(2, 5*time.Second)),
 	)
 
-	// 6. Wait for user to stop the app
+	// 5. Demonstrate Workflows (DAGs)
+	log.Println("🔗 Submitting workflow (Status-based triggers)")
+
+	s.Submit(skedulr.NewPersistentTask("data_process", nil, 5, 0).WithID("base-task"))
+
+	// Runs only on success of base-task
+	s.Submit(
+		skedulr.NewPersistentTask("email_send", nil, 5, 0).
+			WithID("notify-success").
+			OnSuccess("base-task"),
+	)
+
+	// 6. Graceful Shutdown handling
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	fmt.Println("\nExample is running. Check the dashboard! Press Ctrl+C to exit.")
+	log.Println("\nSystem is running. Open the dashboard to see tasks in action.")
+	log.Println("Dead Letter Queue tasks will appear in purple/violet.")
 	<-stop
 
-	fmt.Println("\nCleaning up...")
-	s.ShutDown(context.Background())
-	fmt.Println("Done. 👋")
+	log.Println("\nStopping scheduler cleanly...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	s.ShutDown(shutdownCtx)
+	log.Println("👋 Finished.")
 }

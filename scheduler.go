@@ -107,10 +107,12 @@ const (
 	StatusFailed
 	// StatusCancelled indicates the task was manually cancelled.
 	StatusCancelled
+	// StatusDead indicates the task failed after all retry attempts.
+	StatusDead
 )
 
 func (s TaskStatus) String() string {
-	return [...]string{"Unknown", "Queued", "Running", "Succeeded", "Failed", "Cancelled"}[s]
+	return [...]string{"Unknown", "Queued", "Running", "Succeeded", "Failed", "Cancelled", "Dead"}[s]
 }
 
 type task struct {
@@ -122,6 +124,7 @@ type task struct {
 	cancel        context.CancelFunc
 	retryStrategy RetryStrategy
 	attempts      int
+	maxRetries    int
 	status        TaskStatus
 	progress      int
 	pool          string
@@ -632,6 +635,7 @@ func (s *Scheduler) resolveWorkflow(t *task, status TaskStatus) {
 				priority:     rt.Priority,
 				timeout:      rt.Timeout,
 				attempts:     rt.Attempts,
+				maxRetries:   rt.MaxRetries,
 				job:          job,
 				status:       StatusQueued,
 				dependencies: nil, // Ready for execution
@@ -655,6 +659,34 @@ func (s *Scheduler) Status(id string) TaskStatus {
 func (s *Scheduler) handleFailure(t *task, err error) {
 	atomic.AddInt64(&s.failureCount, 1)
 
+	if t.maxRetries > 0 && t.attempts >= t.maxRetries {
+		s.mu.Lock()
+		if trackTask, ok := s.tasks[t.id]; ok {
+			trackTask.status = StatusDead
+		}
+		s.mu.Unlock()
+		if t.typeName != "" {
+			s.storage.Save(context.Background(), &PersistentTask{
+				ID:         t.id,
+				Key:        t.key,
+				Pool:       t.pool,
+				TypeName:   t.typeName,
+				Payload:    t.payload,
+				Priority:   t.priority,
+				Timeout:    t.timeout,
+				Attempts:   t.attempts,
+				MaxRetries: t.maxRetries,
+			})
+			s.storage.CompleteTask(context.Background(), t.id)
+			// StatusDead is considered a terminal failure for workflows unless handled
+			s.resolveWorkflow(t, StatusDead)
+		}
+		if s.logger != nil {
+			s.logger.Error("task exceeded max retries and is now DEAD", err, "task_id", t.id, "attempts", t.attempts)
+		}
+		return
+	}
+
 	if t.retryStrategy != nil {
 		delay, retry := t.retryStrategy.NextDelay(t.attempts)
 		if retry {
@@ -662,7 +694,11 @@ func (s *Scheduler) handleFailure(t *task, err error) {
 			retryTask := NewTask(t.job, t.priority, t.timeout)
 			retryTask.id = t.id // Preserve ID for tracking
 			retryTask.attempts = t.attempts + 1
+			retryTask.maxRetries = t.maxRetries
 			retryTask.retryStrategy = t.retryStrategy
+			retryTask.pool = t.pool
+			retryTask.typeName = t.typeName
+			retryTask.payload = t.payload
 
 			time.AfterFunc(delay, func() {
 				s.Submit(retryTask)
@@ -754,6 +790,7 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 			Priority:     t.priority,
 			Timeout:      t.timeout,
 			Attempts:     t.attempts,
+			MaxRetries:   t.maxRetries,
 			DependsOn:    t.dependsOn,
 			Dependencies: t.dependencies,
 		}
@@ -1071,4 +1108,42 @@ func (s *Scheduler) ScalePool(pool string, n int) {
 			}
 		}
 	}
+}
+
+// WithMaxRetries sets the maximum number of times a task should be retried before becoming Dead.
+func (t *task) WithMaxRetries(n int) *task {
+	t.maxRetries = n
+	return t
+}
+
+// Resubmit takes a task out of the Dead Letter Queue and puts it back into the scheduler.
+// It resets the attempt count to 0.
+func (s *Scheduler) Resubmit(id string) error {
+	s.mu.Lock()
+	t, ok := s.tasks[id]
+	if !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("task %s not found", id)
+	}
+	
+	if t.status != StatusDead && t.status != StatusFailed {
+		s.mu.Unlock()
+		return fmt.Errorf("task %s is not in a failed or dead state", id)
+	}
+
+	// Reset attempts for a fresh start
+	t.attempts = 0
+	t.status = StatusQueued
+	heap.Push(&s.queue, t)
+	atomic.AddInt64(&s.queueSize, 1)
+	s.cond.Signal()
+	s.mu.Unlock()
+
+	return nil
+}
+
+// WithRetryStrategy sets a custom retry strategy for the task.
+func (t *task) WithRetryStrategy(rs RetryStrategy) *task {
+	t.retryStrategy = rs
+	return t
 }
