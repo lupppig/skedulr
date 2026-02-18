@@ -488,6 +488,14 @@ func (m *distributedMockStorage) Dequeue(ctx context.Context, instanceID string,
 	return nil, nil
 }
 
+func (m *distributedMockStorage) CompleteTask(ctx context.Context, id string) error {
+	return m.Delete(ctx, id)
+}
+
+func (m *distributedMockStorage) RecoverOrphaned(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
 func TestDistributedCoordination(t *testing.T) {
 	storage := &distributedMockStorage{
 		tasks:  make(map[string]*skedulr.PersistentTask),

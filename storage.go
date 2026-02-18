@@ -66,8 +66,33 @@ var (
 		local task_data = res[1]
 		local task = cjson.decode(task_data)
 		local lease_key = ARGV[1] .. task.id .. ":lease"
+		local processing_key = ARGV[1] .. "processing"
 		redis.call("SET", lease_key, ARGV[2], "EX", ARGV[3])
+		redis.call("SADD", processing_key, task.id)
 		return task_data
+	`)
+
+	luaRecover = redis.NewScript(`
+		local processing_key = KEYS[1]
+		local prefix = ARGV[1]
+		local queue_key = ARGV[2]
+		local ids = redis.call("SMEMBERS", processing_key)
+		local recovered = 0
+		for _, id in ipairs(ids) do
+			local lease_key = prefix .. id .. ":lease"
+			if redis.call("EXISTS", lease_key) == 0 then
+				local task_data = redis.call("GET", prefix .. id)
+				if task_data then
+					local task = cjson.decode(task_data)
+					redis.call("ZADD", queue_key, task.priority, task_data)
+					redis.call("SREM", processing_key, id)
+					recovered = recovered + 1
+				else
+					redis.call("SREM", processing_key, id)
+				end
+			end
+		end
+		return recovered
 	`)
 )
 
@@ -96,6 +121,8 @@ type Storage interface {
 	GetHistory(ctx context.Context, filter HistoryFilter) ([]TaskInfo, error)
 	MarkCancelled(ctx context.Context, id string) error
 	IsCancelled(ctx context.Context, id string) (bool, error)
+	CompleteTask(ctx context.Context, id string) error
+	RecoverOrphaned(ctx context.Context) (int, error)
 }
 
 // InMemoryStorage is a basic storage implementation used as a fallback.
@@ -165,6 +192,14 @@ func (s *InMemoryStorage) IsCancelled(ctx context.Context, id string) (bool, err
 	return false, nil
 }
 
+func (s *InMemoryStorage) CompleteTask(ctx context.Context, id string) error {
+	return nil
+}
+
+func (s *InMemoryStorage) RecoverOrphaned(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
 // RedisStorage implements Storage using Redis.
 type RedisStorage struct {
 	client *redis.Client
@@ -198,7 +233,16 @@ func (s *RedisStorage) Save(ctx context.Context, t *PersistentTask) error {
 }
 
 func (s *RedisStorage) Delete(ctx context.Context, id string) error {
-	return s.client.Del(ctx, s.prefix+id).Err()
+	pipe := s.client.Pipeline()
+	pipe.Del(ctx, s.prefix+id)
+	pipe.Del(ctx, s.prefix+id+":lease")
+	pipe.SRem(ctx, s.prefix+"processing", id)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func (s *RedisStorage) CompleteTask(ctx context.Context, id string) error {
+	return s.Delete(ctx, id)
 }
 
 func (s *RedisStorage) LoadAll(ctx context.Context) ([]*PersistentTask, error) {
@@ -375,6 +419,16 @@ func (s *RedisStorage) IsCancelled(ctx context.Context, id string) (bool, error)
 	key := s.prefix + "cancelled:" + id
 	n, err := s.client.Exists(ctx, key).Result()
 	return n > 0, err
+}
+
+func (s *RedisStorage) RecoverOrphaned(ctx context.Context) (int, error) {
+	processingKey := s.prefix + "processing"
+	queueKey := s.prefix + "queue"
+	res, err := luaRecover.Run(ctx, s.client, []string{processingKey}, s.prefix, queueKey).Int()
+	if err != nil {
+		return 0, fmt.Errorf("recovery failed: %w", err)
+	}
+	return res, nil
 }
 
 func (s *RedisStorage) GetHistory(ctx context.Context, filter HistoryFilter) ([]TaskInfo, error) {

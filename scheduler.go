@@ -87,6 +87,7 @@ type Scheduler struct {
 	loopWg           sync.WaitGroup
 	historyRetention time.Duration
 	paused           int32
+	recoveryInterval time.Duration
 }
 
 // TaskStatus represents the current state of a task.
@@ -145,6 +146,7 @@ func New(opts ...Option) *Scheduler {
 		instanceID:       generateId(),
 		leaseDuration:    30 * time.Second,   // Default lease
 		historyRetention: 7 * 24 * time.Hour, // Default 7 days
+		recoveryInterval: 1 * time.Minute,    // Default recovery interval
 	}
 	s.cond = sync.NewCond(&s.mu)
 
@@ -159,6 +161,9 @@ func New(opts ...Option) *Scheduler {
 
 	s.loopWg.Add(1)
 	go s.cleanupLoop()
+
+	s.loopWg.Add(1)
+	go s.recoveryLoop()
 
 	s.storage.SubscribeCancel(context.Background(), func(id string) {
 		s.mu.Lock()
@@ -534,13 +539,13 @@ func (s *Scheduler) runTask(t *task) {
 				s.logger.Error("task failed", err, "task_id", t.id)
 			}
 			if t.typeName != "" {
-				s.storage.Delete(context.Background(), t.id)
+				s.storage.CompleteTask(context.Background(), t.id)
 				s.resolveWorkflow(t, StatusFailed)
 			}
 			s.handleFailure(t, err)
 		} else {
 			if t.typeName != "" {
-				s.storage.Delete(context.Background(), t.id)
+				s.storage.CompleteTask(context.Background(), t.id)
 				s.resolveWorkflow(t, StatusSucceeded)
 			}
 			atomic.AddInt64(&s.successCount, 1)
@@ -563,7 +568,7 @@ func (s *Scheduler) runTask(t *task) {
 			s.logger.Error("task context cancelled or timed out", ctx.Err(), "task_id", t.id)
 		}
 		if t.typeName != "" {
-			s.storage.Delete(context.Background(), t.id)
+			s.storage.CompleteTask(context.Background(), t.id)
 			s.resolveWorkflow(t, finalStatus)
 		}
 		s.handleFailure(t, ctx.Err())
@@ -988,4 +993,26 @@ func (s *Scheduler) Resume() {
 // IsPaused returns true if the scheduler is currently paused.
 func (s *Scheduler) IsPaused() bool {
 	return atomic.LoadInt32(&s.paused) == 1
+}
+
+func (s *Scheduler) recoveryLoop() {
+	defer s.loopWg.Done()
+	ticker := time.NewTicker(s.recoveryInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			count, err := s.storage.RecoverOrphaned(context.Background())
+			if err != nil {
+				if s.logger != nil {
+					s.logger.Error("failed to recover orphaned tasks", err)
+				}
+			} else if count > 0 && s.logger != nil {
+				s.logger.Info("recovered abandoned tasks", "count", count)
+			}
+		case <-s.stop:
+			return
+		}
+	}
 }

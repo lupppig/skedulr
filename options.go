@@ -125,3 +125,12 @@ func WithHistoryRetention(d time.Duration) Option {
 		s.historyRetention = d
 	}
 }
+
+// WithRecoveryInterval sets the interval for checking and recovering abandoned tasks from the processing set.
+func WithRecoveryInterval(d time.Duration) Option {
+	return func(s *Scheduler) {
+		if d > 0 {
+			s.recoveryInterval = d
+		}
+	}
+}
