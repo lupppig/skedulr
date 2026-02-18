@@ -10,18 +10,25 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// TaskDependency represents a link between tasks with a specific trigger condition.
+type TaskDependency struct {
+	ParentID string     `json:"parent_id"`
+	Trigger  TaskStatus `json:"trigger"`
+}
+
 // PersistentTask represents the serializable state of a task.
 type PersistentTask struct {
-	ID            string        `json:"id"`
-	Key           string        `json:"key,omitempty"`
-	Pool          string        `json:"pool,omitempty"`
-	TypeName      string        `json:"type_name,omitempty"`
-	Payload       []byte        `json:"payload,omitempty"`
-	Priority      int           `json:"priority"`
-	Timeout       time.Duration `json:"timeout"`
-	Attempts      int           `json:"attempts"`
-	RetryStrategy string        `json:"retry_strategy,omitempty"`
-	DependsOn     []string      `json:"depends_on,omitempty"`
+	ID            string           `json:"id"`
+	Key           string           `json:"key,omitempty"`
+	Pool          string           `json:"pool,omitempty"`
+	TypeName      string           `json:"type_name,omitempty"`
+	Payload       []byte           `json:"payload,omitempty"`
+	Priority      int              `json:"priority"`
+	Timeout       time.Duration    `json:"timeout"`
+	Attempts      int              `json:"attempts"`
+	RetryStrategy string           `json:"retry_strategy,omitempty"`
+	DependsOn     []string         `json:"depends_on,omitempty"` // Legacy support
+	Dependencies  []TaskDependency `json:"dependencies,omitempty"`
 }
 
 var (
@@ -35,7 +42,8 @@ var (
 	`)
 
 	luaResolveDeps = redis.NewScript(`
-		local child_ids = redis.call("SMEMBERS", KEYS[1])
+		local children_key = KEYS[1]
+		local child_ids = redis.call("SMEMBERS", children_key)
 		local ready_tasks = {}
 		for _, child_id in ipairs(child_ids) do
 			local deps_key = ARGV[1] .. child_id .. ":deps_count"
@@ -48,7 +56,7 @@ var (
 				end
 			end
 		end
-		redis.call("DEL", KEYS[1])
+		redis.call("DEL", children_key)
 		return ready_tasks
 	`)
 
@@ -81,7 +89,7 @@ type Storage interface {
 	PublishCancel(ctx context.Context, id string) error
 	SubscribeCancel(ctx context.Context, onCancel func(id string)) error
 	SaveWaiting(ctx context.Context, t *PersistentTask) error
-	ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error)
+	ResolveDependencies(ctx context.Context, parentID string, status TaskStatus) ([]*PersistentTask, error)
 	Enqueue(ctx context.Context, t *PersistentTask) error
 	Dequeue(ctx context.Context, instanceID string, duration time.Duration) (*PersistentTask, error)
 	AddToHistory(ctx context.Context, t TaskInfo, retention time.Duration) error
@@ -110,7 +118,7 @@ func (s *InMemoryStorage) SubscribeCancel(ctx context.Context, onCancel func(id 
 	return nil
 }
 func (s *InMemoryStorage) SaveWaiting(ctx context.Context, t *PersistentTask) error { return nil }
-func (s *InMemoryStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error) {
+func (s *InMemoryStorage) ResolveDependencies(ctx context.Context, parentID string, status TaskStatus) ([]*PersistentTask, error) {
 	return nil, nil
 }
 func (s *InMemoryStorage) AddToHistory(ctx context.Context, t TaskInfo, retention time.Duration) error {
@@ -248,15 +256,22 @@ func (s *RedisStorage) SaveWaiting(ctx context.Context, t *PersistentTask) error
 	}
 	s.client.Set(ctx, s.prefix+t.ID, data, 0)
 
-	for _, parentID := range t.DependsOn {
-		s.client.SAdd(ctx, s.prefix+parentID+":children", t.ID)
+	// Combine legacy DependsOn with new Dependencies
+	allDeps := t.Dependencies
+	for _, id := range t.DependsOn {
+		allDeps = append(allDeps, TaskDependency{ParentID: id, Trigger: StatusSucceeded})
 	}
-	s.client.Set(ctx, s.prefix+t.ID+":deps_count", len(t.DependsOn), 0)
+
+	for _, dep := range allDeps {
+		childrenKey := fmt.Sprintf("%s%s:children:%d", s.prefix, dep.ParentID, dep.Trigger)
+		s.client.SAdd(ctx, childrenKey, t.ID)
+	}
+	s.client.Set(ctx, s.prefix+t.ID+":deps_count", len(allDeps), 0)
 	return nil
 }
 
-func (s *RedisStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*PersistentTask, error) {
-	childrenKey := s.prefix + parentID + ":children"
+func (s *RedisStorage) ResolveDependencies(ctx context.Context, parentID string, status TaskStatus) ([]*PersistentTask, error) {
+	childrenKey := fmt.Sprintf("%s%s:children:%d", s.prefix, parentID, status)
 	res, err := luaResolveDeps.Run(ctx, s.client, []string{childrenKey}, s.prefix).StringSlice()
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve dependencies: %w", err)

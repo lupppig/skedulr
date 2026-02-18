@@ -126,6 +126,7 @@ type task struct {
 	typeName      string
 	payload       []byte
 	dependsOn     []string
+	dependencies  []TaskDependency
 }
 
 // New creates and starts a new Scheduler with the provided options.
@@ -403,13 +404,13 @@ type contextKey string
 type progressFunc func(int)
 
 const (
-	taskIDKey   contextKey = "task_id"
+	TaskIDKey   contextKey = "task_id"
 	progressKey contextKey = "task_progress"
 )
 
 // TaskID returns the task ID associated with the context, if any.
 func TaskID(ctx context.Context) string {
-	if id, ok := ctx.Value(taskIDKey).(string); ok {
+	if id, ok := ctx.Value(TaskIDKey).(string); ok {
 		return id
 	}
 	return ""
@@ -453,7 +454,7 @@ func (s *Scheduler) runTask(t *task) {
 		s.mu.Unlock()
 	}
 
-	baseCtx := context.WithValue(context.Background(), taskIDKey, t.id)
+	baseCtx := context.WithValue(context.Background(), TaskIDKey, t.id)
 	baseCtx = context.WithValue(baseCtx, progressKey, progressFunc(updateProgress))
 
 	if delay > 0 {
@@ -532,40 +533,26 @@ func (s *Scheduler) runTask(t *task) {
 			if s.logger != nil {
 				s.logger.Error("task failed", err, "task_id", t.id)
 			}
+			if t.typeName != "" {
+				s.storage.Delete(context.Background(), t.id)
+				s.resolveWorkflow(t, StatusFailed)
+			}
 			s.handleFailure(t, err)
 		} else {
 			if t.typeName != "" {
 				s.storage.Delete(context.Background(), t.id)
-				readyTasks, _ := s.storage.ResolveDependencies(context.Background(), t.id)
-				for _, rt := range readyTasks {
-					job, ok := s.getJob(rt.TypeName)
-					if ok {
-						jt := &task{
-							id:        rt.ID,
-							key:       rt.Key,
-							typeName:  rt.TypeName,
-							payload:   rt.Payload,
-							priority:  rt.Priority,
-							timeout:   rt.Timeout,
-							attempts:  rt.Attempts,
-							job:       job,
-							status:    StatusQueued,
-							dependsOn: nil, // Clear dependencies
-						}
-						s.Submit(jt)
-					}
-				}
+				s.resolveWorkflow(t, StatusSucceeded)
 			}
 			atomic.AddInt64(&s.successCount, 1)
 		}
 	case <-ctx.Done():
 		s.mu.Lock()
+		finalStatus := StatusFailed
+		if ctx.Err() == context.Canceled {
+			finalStatus = StatusCancelled
+		}
 		if trackTask, ok := s.tasks[t.id]; ok {
-			if ctx.Err() == context.Canceled {
-				trackTask.status = StatusCancelled
-			} else {
-				trackTask.status = StatusFailed
-			}
+			trackTask.status = finalStatus
 		}
 		if t.key != "" {
 			delete(s.activeKeys, t.key)
@@ -577,6 +564,7 @@ func (s *Scheduler) runTask(t *task) {
 		}
 		if t.typeName != "" {
 			s.storage.Delete(context.Background(), t.id)
+			s.resolveWorkflow(t, finalStatus)
 		}
 		s.handleFailure(t, ctx.Err())
 	}
@@ -607,6 +595,28 @@ func (s *Scheduler) recordHistory(t *task) {
 	}
 
 	s.storage.AddToHistory(context.Background(), info, s.historyRetention)
+}
+
+func (s *Scheduler) resolveWorkflow(t *task, status TaskStatus) {
+	readyTasks, _ := s.storage.ResolveDependencies(context.Background(), t.id, status)
+	for _, rt := range readyTasks {
+		job, ok := s.getJob(rt.TypeName)
+		if ok {
+			jt := &task{
+				id:           rt.ID,
+				key:          rt.Key,
+				typeName:     rt.TypeName,
+				payload:      rt.Payload,
+				priority:     rt.Priority,
+				timeout:      rt.Timeout,
+				attempts:     rt.Attempts,
+				job:          job,
+				status:       StatusQueued,
+				dependencies: nil, // Ready for execution
+			}
+			s.Submit(jt)
+		}
+	}
 }
 
 // Status returns the current status of a task.
@@ -714,18 +724,19 @@ func (s *Scheduler) Submit(t *task) (string, error) {
 	// Persist if it's a named job
 	if t.typeName != "" {
 		pt := &PersistentTask{
-			ID:        t.id,
-			Key:       t.key,
-			Pool:      t.pool,
-			TypeName:  t.typeName,
-			Payload:   t.payload,
-			Priority:  t.priority,
-			Timeout:   t.timeout,
-			Attempts:  t.attempts,
-			DependsOn: t.dependsOn,
+			ID:           t.id,
+			Key:          t.key,
+			Pool:         t.pool,
+			TypeName:     t.typeName,
+			Payload:      t.payload,
+			Priority:     t.priority,
+			Timeout:      t.timeout,
+			Attempts:     t.attempts,
+			DependsOn:    t.dependsOn,
+			Dependencies: t.dependencies,
 		}
 
-		if len(t.dependsOn) > 0 {
+		if len(t.dependsOn) > 0 || len(t.dependencies) > 0 {
 			if err := s.storage.SaveWaiting(context.Background(), pt); err != nil {
 				return "", fmt.Errorf("failed to save waiting task: %w", err)
 			}
@@ -767,9 +778,33 @@ func (t *task) WithID(id string) *task {
 	return t
 }
 
-// DependsOn specifies task IDs that this task must wait for.
+// WithTypeName sets the job type name for persistence.
+func (t *task) WithTypeName(name string) *task {
+	t.typeName = name
+	return t
+}
+
+// WithPayload sets the payload for the task.
+func (t *task) WithPayload(payload []byte) *task {
+	t.payload = payload
+	return t
+}
+
+// DependsOn specifies task IDs that this task must wait for (success is required).
 func (t *task) DependsOn(ids ...string) *task {
-	t.dependsOn = ids
+	t.dependsOn = append(t.dependsOn, ids...)
+	return t
+}
+
+// OnSuccess specifies that this task depends on the successful completion of a parent task.
+func (t *task) OnSuccess(parentID string) *task {
+	t.dependencies = append(t.dependencies, TaskDependency{ParentID: parentID, Trigger: StatusSucceeded})
+	return t
+}
+
+// OnFailure specifies that this task depends on the failure of a parent task.
+func (t *task) OnFailure(parentID string) *task {
+	t.dependencies = append(t.dependencies, TaskDependency{ParentID: parentID, Trigger: StatusFailed})
 	return t
 }
 

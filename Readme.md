@@ -3,99 +3,191 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/lupppig/skedulr.svg)](https://pkg.go.dev/github.com/lupppig/skedulr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-Skedulr is a concurrent task scheduler for Go, built for production environments that need more than just a basic worker pool. It handles the "hard parts" of scheduling—retries, persistence, and distributed coordination—without adding massive complexity to your codebase.
+**Skedulr** is a lightweight yet powerful background task scheduler for Go.
+It is built for reliability, scalability, and simplicity — ensuring your tasks execute correctly even across restarts or across multiple application instances.
+
+Whether you're building a small service or a distributed system, Skedulr helps you manage background jobs with confidence.
+
+---
 
 ## Why Skedulr?
 
-- **Real reliability**: Handles retries with exponential backoff and jitter out of the box.
-- **Persistence**: Optionally back your tasks with Redis so they survive app restarts.
-- **Distributed native**: Safely run multiple instances of your app with atomic task claiming, leases, and heartbeat protection.
-- **Persistent History**: Task history is now durable in Redis with configurable retention (sorted set indexing).
-- **Production Tuned**: Silences external dependency logs (like Redis) by default to keep your production console clean.
-- **Visuals**: Comes with a real-time dashboard so you can actually see what your workers are doing.
-- **Zero-poll engine**: Uses condition variables internally, meaning zero idle CPU usage while still reacting instantly to new tasks.
+### Reliable Execution
+
+With Redis-backed persistence, tasks survive application restarts. Your scheduler resumes exactly where it left off.
+
+### Horizontal Scaling
+
+Run multiple instances of your application and Skedulr coordinates workers safely using distributed locking — preventing duplicate execution.
+
+### Smart Retries
+
+Failed tasks are retried automatically with configurable retry and backoff strategies.
+
+### Task Dependencies (DAG Support)
+
+Create task chains where jobs run conditionally based on the success or failure of other tasks.
+
+### Built-in Dashboard
+
+Visualize running, completed, and failed tasks in real time.
+
+### Concurrency Control
+
+* Worker pool limits
+* Dedicated pools for specific task types
+* Unique task keys to prevent overlapping execution
+
+---
+
+## How It Works
+
+Skedulr acts as an intelligent task orchestrator:
+
+```mermaid
+graph TD
+    Submit[User Submits Task] --> Store[Stored in Redis/Memory]
+    Store --> Worker[Available Worker Claims Task]
+    Worker --> Run[Execute Task]
+    Run --> Result{Is Outcome?}
+    Result -- Success --> Next[Next Task in Chain]
+    Result -- Failure --> Recovery[Retry or Cleanup Task]
+    Next --> End[Task Complete]
+    Recovery --> End
+```
+
+1. Tasks are submitted to the scheduler.
+2. Tasks are stored (in-memory or Redis).
+3. Workers claim and execute tasks.
+4. Results determine retries or downstream task execution.
+
+---
 
 ## Installation
 
 ```bash
-# Pull the latest stable version
 go get github.com/lupppig/skedulr
 ```
 
+---
+
 ## Quick Start
 
-Getting a scheduler up and running takes about ten lines of code.
+Getting started takes only a few lines:
 
 ```go
 package main
 
 import (
-    "context"
-    "time"
-    "github.com/lupppig/skedulr"
+	"context"
+
+	"github.com/lupppig/skedulr"
 )
 
 func main() {
-    // 1. Fire up the scheduler
-    s := skedulr.New(
-        skedulr.WithMaxWorkers(10),
-        skedulr.WithTaskTimeout(5 * time.Second),
-    )
-    
-    // 2. Define your work
-    job := func(ctx context.Context) error {
-        // Your logic here...
-        return nil
-    }
+	s := skedulr.New(
+		skedulr.WithMaxWorkers(5),
+	)
 
-    // 3. Queue it up
-    s.Submit(skedulr.NewTask(job, 10, 0))
+	myTask := func(ctx context.Context) error {
+		println("I am working!")
+		return nil
+	}
 
-    // 4. Graceful shutdown
-    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-    defer cancel()
-    s.ShutDown(ctx)
+	s.Submit(skedulr.NewTask(myTask, 1, 0))
+
+	s.ShutDown(context.Background())
 }
 ```
 
-## Practical Features
+---
 
-### Distributed Coordination
-If you scale your app to multiple containers, Skedulr ensures only one instance runs a specific persistent task at a time. It uses a lease system with heartbeats to recover tasks if a node crashes mid-job.
+## Advanced Workflows (Task Chains)
 
-### Dashboards that actually help
-Instead of guessing why your queue is slow, mount the built-in dashboard to any HTTP path. It shows live stats, success/failure counts, and lets you cancel tasks manually.
+Skedulr supports Directed Acyclic Graphs (DAGs), allowing conditional execution.
 
-```go
-// Mount to your existing router
-http.Handle("/debug/skedulr/", http.StripPrefix("/debug/skedulr", s.DashboardHandler()))
+```mermaid
+graph TD
+    TaskA[Task A] --> Status{Outcome?}
+    Status -- Success --> TaskB[Task B]
+    Status -- Failure --> TaskC[Task C]
 ```
 
-### Persistence (Redis)
-Persistent tasks solve the "lost work" problem during deployments. Register your job functions, and Skedulr will reload them from Redis on startup.
+Example:
 
 ```go
-sch := skedulr.New(
-    skedulr.WithRedisStorage("localhost:6379", "", 0),
-    skedulr.WithJob("send_email", myEmailFunc),
+s.Submit(
+	skedulr.NewTask(jobB).
+		OnSuccess("task-a"),
 )
 
-// This task is now safe from restarts
-sch.Submit(skedulr.NewPersistentTask("send_email", payload, 10, 0))
+s.Submit(
+	skedulr.NewTask(jobC).
+		OnFailure("task-a"),
+)
 ```
 
-### Retries & Backpressure
-- **Exponential Backoff**: Prevent "thundering herd" issues with randomized jitter.
-- **Queue Limits**: Use `WithMaxCapacity` to prevent memory exhaustion when your system is overloaded.
-- **Singleton Tasks**: Prevent overlapping executions of the same job using `WithKey`.
+This allows you to:
 
-## Monitoring
+* Run cleanup tasks on failure
+* Trigger dependent workflows on success
+* Build complex automation pipelines
 
-You can pull stats programmatically for your own Prometheus/Grafana export:
-```go
-stats := s.Stats() 
-fmt.Printf("Queued: %d, Workers: %d\n", stats.QueueSize, stats.CurrentWorkers)
-```
+---
+
+## Features for Production Applications
+
+### Storage Options
+
+* In-memory storage for simple use cases
+* Redis-backed persistence for distributed systems
+
+### Custom Worker Pools
+
+Allocate dedicated workers per task category:
+
+* 2 workers for Emails
+* 5 workers for Video Processing
+* 10 workers for Analytics
+
+### Unique Task Keys
+
+Ensure certain tasks never run concurrently (for example, preventing multiple "Weekly Report" jobs at once).
+
+### Task History
+
+Track execution history and inspect:
+
+* Successes
+* Failures
+* Retries
+* Execution duration
+
+### Web Dashboard
+
+Mount the dashboard to monitor:
+
+* Worker activity
+* Queue depth
+* Task states
+* Retry attempts
+
+---
+
+## When to Use Skedulr
+
+Skedulr is ideal for:
+
+* Background email sending
+* Payment verification retries
+* Webhook processing
+* Report generation
+* Media processing
+* Distributed microservices task coordination
+
+---
 
 ## License
-MIT. Use it freely for whatever you're building.
+
+MIT License.
+Use it freely in personal and commercial projects.

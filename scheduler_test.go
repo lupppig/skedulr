@@ -363,7 +363,7 @@ type distributedMockStorage struct {
 	tasks             map[string]*skedulr.PersistentTask
 	leases            map[string]string // taskID -> instanceID
 	cancelSubscribers []func(string)
-	waiting           map[string][]*skedulr.PersistentTask // parentID -> children
+	waiting           map[string][]*skedulr.PersistentTask // statusKey -> children
 	depCounts         map[string]int                       // childID -> remaining deps
 }
 
@@ -431,24 +431,36 @@ func (m *distributedMockStorage) SaveWaiting(ctx context.Context, t *skedulr.Per
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.tasks[t.ID] = t
-	m.depCounts[t.ID] = len(t.DependsOn)
-	for _, pid := range t.DependsOn {
-		m.waiting[pid] = append(m.waiting[pid], t)
+
+	// Combine legacy DependsOn with new Dependencies
+	allDeps := t.Dependencies
+	for _, id := range t.DependsOn {
+		allDeps = append(allDeps, skedulr.TaskDependency{ParentID: id, Trigger: skedulr.StatusSucceeded})
 	}
+
+	for _, dep := range allDeps {
+		key := fmt.Sprintf("%s:%d", dep.ParentID, dep.Trigger)
+		m.waiting[key] = append(m.waiting[key], t)
+	}
+	m.depCounts[t.ID] = len(allDeps)
 	return nil
 }
-func (m *distributedMockStorage) ResolveDependencies(ctx context.Context, parentID string) ([]*skedulr.PersistentTask, error) {
+func (m *distributedMockStorage) ResolveDependencies(ctx context.Context, parentID string, status skedulr.TaskStatus) ([]*skedulr.PersistentTask, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	children := m.waiting[parentID]
+
+	key := fmt.Sprintf("%s:%d", parentID, status)
+	children := m.waiting[key]
+	delete(m.waiting, key)
+
 	var ready []*skedulr.PersistentTask
 	for _, child := range children {
 		m.depCounts[child.ID]--
 		if m.depCounts[child.ID] == 0 {
 			ready = append(ready, child)
+			delete(m.depCounts, child.ID)
 		}
 	}
-	delete(m.waiting, parentID)
 	return ready, nil
 }
 
@@ -839,5 +851,69 @@ func TestWorkerPools(t *testing.T) {
 
 	if !received["cpu"] || !received["io"] || !received["default"] {
 		t.Errorf("Missing results: %+v", received)
+	}
+}
+
+func TestWorkflowBranching(t *testing.T) {
+	// We need distributedMockStorage for this since InMemoryStorage is a placeholder for workflows
+	storage := &distributedMockStorage{
+		tasks:     make(map[string]*skedulr.PersistentTask),
+		waiting:   make(map[string][]*skedulr.PersistentTask),
+		depCounts: make(map[string]int),
+	}
+
+	sch := skedulr.New(
+		skedulr.WithStorage(storage),
+	)
+	defer sch.ShutDown(context.Background())
+
+	processed := make(chan string, 10)
+
+	sch.RegisterJob("base", func(ctx context.Context) error {
+		id := skedulr.TaskID(ctx)
+		processed <- "base-" + id
+		if id == "fail-me" {
+			return fmt.Errorf("intentional failure")
+		}
+		return nil
+	})
+
+	sch.RegisterJob("on-success", func(ctx context.Context) error {
+		processed <- "success-branch"
+		return nil
+	})
+
+	sch.RegisterJob("on-failure", func(ctx context.Context) error {
+		processed <- "failure-branch"
+		return nil
+	})
+
+	// Case 1: Base succeeds -> Success branch runs
+	sch.Submit(skedulr.NewTask(nil, 1, 0).WithID("succeed-me").WithTypeName("base"))
+	sch.Submit(skedulr.NewTask(nil, 1, 0).WithID("child-success").WithTypeName("on-success").OnSuccess("succeed-me"))
+
+	// Case 2: Base fails -> Failure branch runs
+	sch.Submit(skedulr.NewTask(nil, 1, 0).WithID("fail-me").WithTypeName("base"))
+	sch.Submit(skedulr.NewTask(nil, 1, 0).WithID("child-failure").WithTypeName("on-failure").OnFailure("fail-me"))
+
+	expected := map[string]bool{
+		"base-succeed-me": true,
+		"success-branch":  true,
+		"base-fail-me":    true,
+		"failure-branch":  true,
+	}
+
+	for i := 0; i < 4; i++ {
+		select {
+		case res := <-processed:
+			delete(expected, res)
+		case <-time.After(3 * time.Second):
+			t.Errorf("Timed out. Remaining expected: %+v", expected)
+			return
+		}
+	}
+
+	if len(expected) > 0 {
+		t.Errorf("Not all branches executed: %+v", expected)
 	}
 }
