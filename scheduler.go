@@ -90,6 +90,9 @@ type Scheduler struct {
 	paused           int32
 	recoveryInterval time.Duration
 	poolControl      map[string]chan struct{}
+	wheel            *TimingWheel
+	wheelTick        time.Duration
+	wheelSize        int
 }
 
 // TaskStatus represents the current state of a task.
@@ -153,12 +156,21 @@ func New(opts ...Option) *Scheduler {
 		leaseDuration:    30 * time.Second,   // Default lease
 		historyRetention: 7 * 24 * time.Hour, // Default 7 days
 		recoveryInterval: 1 * time.Minute,    // Default recovery interval
+		wheelTick:        10 * time.Millisecond,
+		wheelSize:        256,
 	}
 	s.cond = sync.NewCond(&s.mu)
 
 	for _, opt := range opts {
 		opt(s)
 	}
+
+	// The timing wheel must be running before loadTasks, because any tasks
+	// recovered with a future fire time will route through it. A single
+	// goroutine carries every delayed callback (retry backoff, ScheduleOnce,
+	// ScheduleRecurring, ScheduleCron) instead of one goroutine per task.
+	s.wheel = NewTimingWheel(s.wheelTick, s.wheelSize)
+	s.wheel.Start()
 
 	s.loadTasks()
 
@@ -717,7 +729,11 @@ func (s *Scheduler) handleFailure(t *task, err error) {
 			retryTask.typeName = t.typeName
 			retryTask.payload = t.payload
 
-			time.AfterFunc(delay, func() {
+			// The retry is parked in the shared timing wheel rather than its own
+			// time.AfterFunc goroutine. retryTask.id is intentionally identical
+			// to t.id, so Scheduler.Cancel can reach this pending retry through
+			// the wheel's per-ID index and stop it from ever Submitting.
+			_ = s.wheel.Schedule(retryTask.id, time.Now().Add(delay), func() {
 				s.Submit(retryTask)
 			})
 		}
@@ -884,95 +900,100 @@ func (t *task) OnFailure(parentID string) *task {
 	return t
 }
 
-// ScheduleOnce schedules a job to run at a specific time.
+// ScheduleOnce parks job to fire once at the wall-clock instant `at`. The
+// returned ID is the task ID — pass it to Cancel to stop the fire before it
+// happens. Multiple ScheduleOnce calls cost O(1) goroutines in total: every
+// pending fire lives in the scheduler's shared timing wheel, not its own
+// timer + goroutine.
 func (s *Scheduler) ScheduleOnce(job Job, at time.Time, priority int) (string, error) {
 	t := NewTask(job, priority, 0)
 	return s.ScheduleOnceTask(t, at)
 }
 
-// ScheduleOnceTask schedules a task to run at a specific time.
-// This allows providing a custom Task ID or key.
+// ScheduleOnceTask is ScheduleOnce with a caller-supplied task — use it when
+// you need a custom ID, key, payload, type name, or retry strategy on the
+// fired task. Memory and goroutine cost stay O(1) per pending fire regardless
+// of how many tasks are scheduled, because every fire is a single entry in
+// the shared timing wheel.
 func (s *Scheduler) ScheduleOnceTask(t *task, at time.Time) (string, error) {
 	if atomic.LoadInt32(&s.stopped) == 1 {
 		return "", ErrSchedulerStopped
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// The cancel func is held on the task so Scheduler.Cancel can surface
+	// "cancelled" through the standard context path; the wheel's per-ID
+	// index handles stopping the pending fire itself.
+	_, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
 
 	s.mu.Lock()
 	s.tasks[t.id] = t
 	s.mu.Unlock()
 
-	delay := time.Until(at)
-	timer := time.NewTimer(delay)
-
-	s.loopWg.Add(1)
-	go func() {
-		defer s.loopWg.Done()
-		defer cancel()
-		select {
-		case <-timer.C:
-			s.Submit(t)
-		case <-ctx.Done():
-			timer.Stop()
-		case <-s.stop:
-			timer.Stop()
+	if err := s.wheel.Schedule(t.id, at, func() {
+		// The wheel skips cancelled entries internally — reaching this body
+		// means the task survived to its fire time. A non-nil Submit error
+		// here is almost always ErrSchedulerStopped from a concurrent
+		// ShutDown; log and drop, matching the pre-migration goroutine
+		// loop's behavior on the same race.
+		if _, err := s.Submit(t); err != nil && s.logger != nil {
+			s.logger.Error("ScheduleOnce submit failed", err, "task_id", t.id)
 		}
-	}()
+	}); err != nil {
+		return "", err
+	}
 
 	return t.id, nil
 }
 
-// ScheduleRecurring schedules a job to run at fixed intervals.
+// ScheduleRecurring runs job repeatedly every interval, starting one
+// interval from now. Each fire submits a fresh execution task — the
+// per-fire IDs are distinct, but the recurring schedule itself is
+// addressable by the returned ID, which is what Cancel uses to stop the
+// recurrence.
 func (s *Scheduler) ScheduleRecurring(job Job, interval time.Duration, priority int) (string, error) {
 	t := NewTask(job, priority, interval)
 	return s.ScheduleRecurringTask(t, interval)
 }
 
-// ScheduleRecurringTask schedules a recurring task at fixed intervals.
-// This allows providing a custom Task ID or key.
+// ScheduleRecurringTask is ScheduleRecurring with a caller-supplied template
+// task — useful for setting a custom ID, type name, payload, or retry
+// strategy on each fired execution. The schedule lives as a single
+// self-rescheduling wheel entry that re-arms itself after every fire, so
+// cost is O(1) goroutines regardless of how many recurring tasks exist;
+// Cancel(t.id) finds the next-armed entry via the wheel's per-ID index.
 func (s *Scheduler) ScheduleRecurringTask(t *task, interval time.Duration) (string, error) {
 	if atomic.LoadInt32(&s.stopped) == 1 {
 		return "", ErrSchedulerStopped
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
 
 	s.mu.Lock()
 	s.tasks[t.id] = t
 	s.mu.Unlock()
 
-	s.loopWg.Add(1)
-	go func() {
-		defer s.loopWg.Done()
-		defer cancel()
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				// Each execution is a new task instance in the queue,
-				// but we preserve the type etc.
-				child := &task{
-					id:            generateId(),
-					job:           t.job,
-					typeName:      t.typeName,
-					payload:       t.payload,
-					priority:      t.priority,
-					timeout:       t.timeout,
-					retryStrategy: t.retryStrategy,
-				}
-				s.Submit(child)
-			case <-ctx.Done():
-				return
-			case <-s.stop:
-				return
-			}
+	var fire func()
+	fire = func() {
+		if atomic.LoadInt32(&s.stopped) == 1 {
+			return
 		}
-	}()
+		child := &task{
+			id:            generateId(),
+			job:           t.job,
+			typeName:      t.typeName,
+			payload:       t.payload,
+			priority:      t.priority,
+			timeout:       t.timeout,
+			retryStrategy: t.retryStrategy,
+		}
+		s.Submit(child)
+		_ = s.wheel.Schedule(t.id, time.Now().Add(interval), fire)
+	}
+	if err := s.wheel.Schedule(t.id, time.Now().Add(interval), fire); err != nil {
+		return "", err
+	}
 
 	return t.id, nil
 }
@@ -987,6 +1008,13 @@ func (s *Scheduler) Cancel(id string) error {
 		}
 	}
 	s.mu.Unlock()
+
+	// Pull any in-flight wheel entry (retry backoff / scheduled fire) so its
+	// callback never runs after a cancel.
+	if s.wheel != nil {
+		s.wheel.Cancel(id)
+	}
+	s.storage.UnscheduleDelayed(context.Background(), id)
 
 	// Mark as cancelled in storage so it won't be picked up again if re-dequeued or in queue
 	s.storage.MarkCancelled(context.Background(), id)
@@ -1006,6 +1034,14 @@ func (s *Scheduler) ShutDown(ctx context.Context) error {
 	close(s.stop)
 	s.cond.Broadcast()
 	s.mu.Unlock()
+
+	// Stop the timing wheel before the background loops. Anything still
+	// parked (pending retry, scheduled fire, recurring re-arm) is dropped
+	// here, which is what keeps Submit from being called on a closing
+	// scheduler — the workers and dequeue loop won't be there to handle it.
+	if s.wheel != nil {
+		s.wheel.Stop()
+	}
 
 	// Wait for background loops to exit before closing pool queues
 	s.loopWg.Wait()
