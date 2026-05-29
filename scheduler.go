@@ -99,24 +99,35 @@ type Scheduler struct {
 type TaskStatus int
 
 const (
-	// StatusUnknown indicates the task state is unknown or finished.
+	// StatusUnknown indicates the task is no longer tracked — either it
+	// graduated to history and was evicted from the active map, or it never
+	// existed.
 	StatusUnknown TaskStatus = iota
 	// StatusQueued indicates the task is in the priority queue waiting for a worker.
 	StatusQueued
-	// StatusRunning indicates the task is currently being executed.
+	// StatusRunning indicates the task is currently being executed by a worker.
 	StatusRunning
-	// StatusSucceeded indicates the task finished successfully.
+	// StatusSucceeded indicates the task finished successfully (terminal).
 	StatusSucceeded
-	// StatusFailed indicates the task failed after all retry attempts.
+	// StatusFailed indicates the task's last attempt returned an error and
+	// the task has no retry strategy (or its strategy chose not to retry).
+	// This is the terminal "failed without a safety net" state, distinct
+	// from StatusDead (failed after exhausting the retry budget).
 	StatusFailed
-	// StatusCancelled indicates the task was manually cancelled.
+	// StatusCancelled indicates the task was explicitly cancelled (terminal).
 	StatusCancelled
-	// StatusDead indicates the task failed after all retry attempts.
+	// StatusDead indicates the task failed after exhausting every configured
+	// retry attempt. Dead tasks remain visible in the dashboard and can be
+	// re-armed via Resubmit. Terminal until manually resubmitted.
 	StatusDead
+	// StatusRetrying indicates the task's previous attempt failed but a
+	// retry is currently parked in the timing wheel waiting for its backoff
+	// to elapse. Transitions to StatusQueued when the retry fires.
+	StatusRetrying
 )
 
 func (s TaskStatus) String() string {
-	return [...]string{"Unknown", "Queued", "Running", "Succeeded", "Failed", "Cancelled", "Dead"}[s]
+	return [...]string{"Unknown", "Queued", "Running", "Succeeded", "Failed", "Cancelled", "Dead", "Retrying"}[s]
 }
 
 type task struct {
@@ -556,16 +567,9 @@ func (s *Scheduler) runTask(t *task) {
 
 	select {
 	case err := <-done:
+		// Release the dedup-key slot as soon as the worker is done — a
+		// retry of the same task will re-acquire it from Submit.
 		s.mu.Lock()
-		if trackTask, ok := s.tasks[t.id]; ok {
-			if err != nil {
-				trackTask.status = StatusFailed
-			} else {
-				trackTask.status = StatusSucceeded
-				trackTask.progress = 100 // Ensure 100% on success
-			}
-		}
-
 		if t.key != "" {
 			delete(s.activeKeys, t.key)
 		}
@@ -575,12 +579,19 @@ func (s *Scheduler) runTask(t *task) {
 			if s.logger != nil {
 				s.logger.Error("task failed", err, "task_id", t.id)
 			}
-			if t.typeName != "" {
-				s.storage.CompleteTask(context.Background(), t.id)
-				s.resolveWorkflow(t, StatusFailed)
-			}
+			// handleFailure owns the post-failure decision: set status to
+			// Retrying / Dead / Failed, fire workflow children only on a
+			// terminal outcome, and record history exactly once.
 			s.handleFailure(t, err)
 		} else {
+			s.mu.Lock()
+			if trackTask, ok := s.tasks[t.id]; ok {
+				trackTask.status = StatusSucceeded
+				trackTask.progress = 100
+			}
+			t.status = StatusSucceeded
+			s.recordHistory(t)
+			s.mu.Unlock()
 			if t.typeName != "" {
 				s.storage.CompleteTask(context.Background(), t.id)
 				s.resolveWorkflow(t, StatusSucceeded)
@@ -588,45 +599,60 @@ func (s *Scheduler) runTask(t *task) {
 			atomic.AddInt64(&s.successCount, 1)
 		}
 	case <-ctx.Done():
+		// Context fired — either an explicit Cancel via Scheduler.Cancel
+		// (which already set StatusCancelled in the tracking map) or a
+		// timeout (which we treat as a failure that can still be retried).
 		s.mu.Lock()
 		finalStatus := StatusFailed
 		if ctx.Err() == context.Canceled {
 			finalStatus = StatusCancelled
 		}
 		if trackTask, ok := s.tasks[t.id]; ok {
-			// Respect explicit cancellation — don't overwrite with Failed
+			// If Cancel already set the status, honor it even if the
+			// context says "deadline exceeded" — Cancel happens first
+			// on a racy path where both fire close together.
 			if trackTask.status == StatusCancelled {
 				finalStatus = StatusCancelled
 			}
-			trackTask.status = finalStatus
 		}
-		t.status = finalStatus
 		if t.key != "" {
 			delete(s.activeKeys, t.key)
 		}
+		t.status = finalStatus
 		s.mu.Unlock()
 
 		if s.logger != nil {
 			s.logger.Error("task context cancelled or timed out", ctx.Err(), "task_id", t.id)
 		}
-		if t.typeName != "" {
-			s.storage.CompleteTask(context.Background(), t.id)
-			s.resolveWorkflow(t, finalStatus)
-		}
-		// Only retry on actual failures, never on cancellation
-		if finalStatus != StatusCancelled {
+
+		if finalStatus == StatusCancelled {
+			// Terminal — finalize here. No retry path for an explicit cancel.
+			s.mu.Lock()
+			if trackTask, ok := s.tasks[t.id]; ok {
+				trackTask.status = StatusCancelled
+			}
+			s.recordHistory(t)
+			s.mu.Unlock()
+			if t.typeName != "" {
+				s.storage.CompleteTask(context.Background(), t.id)
+				s.resolveWorkflow(t, StatusCancelled)
+			}
+		} else {
+			// Timeout → let handleFailure decide retry vs Dead vs Failed.
 			s.handleFailure(t, ctx.Err())
 		}
 	}
 
-	// For one-off tasks (not identified as recurring), clean up from the tracking map
-	// However, recurring tasks create new task objects for each run, so we need careful cleaning.
-	// Simple approach: After terminal state, remove from map.
-	// Record history before removing from active tasks
+	// Eviction policy: keep terminal-but-actionable tasks (Dead/Failed) and
+	// in-flight retries (Retrying) in the active map so the dashboard can
+	// show them and Resubmit can find them. Drop everything else once it
+	// reaches the bottom of this function — Succeeded / Cancelled tasks
+	// are recorded in history and no longer interesting in the live view.
 	s.mu.Lock()
-	s.recordHistory(t)
-	// Preserve Dead and Failed tasks in memory so they can be resubmitted via API/Dashboard
-	if t.status != StatusDead && t.status != StatusFailed {
+	switch t.status {
+	case StatusDead, StatusFailed, StatusRetrying:
+		// keep
+	default:
 		delete(s.tasks, t.id)
 	}
 	s.mu.Unlock()
@@ -684,9 +710,24 @@ func (s *Scheduler) Status(id string) TaskStatus {
 	return StatusUnknown
 }
 
+// handleFailure decides what happens after a worker reports an error. There
+// are three terminal outcomes the dashboard cares about — Dead, Failed, and
+// Retrying — and the order of operations here is what keeps the status the
+// user sees in sync with what the scheduler is actually doing.
+//
+//   - Exhausted retries → StatusDead, fire OnFailure children, finalize.
+//   - Retry available → StatusRetrying, schedule retry on the wheel. Do NOT
+//     fire OnFailure children yet — the task isn't terminally failed.
+//   - No retry strategy at all → StatusFailed, fire OnFailure children,
+//     finalize.
+//
+// Pre-fix, OnFailure children fired on every attempt of a retrying task,
+// because resolveWorkflow ran in the worker right after the error, before
+// handleFailure had a chance to decide whether a retry was coming.
 func (s *Scheduler) handleFailure(t *task, err error) {
 	atomic.AddInt64(&s.failureCount, 1)
 
+	// Retry exhausted → Dead.
 	if t.maxRetries > 0 && t.attempts >= t.maxRetries {
 		atomic.AddInt64(&s.deadCount, 1)
 		s.mu.Lock()
@@ -707,21 +748,39 @@ func (s *Scheduler) handleFailure(t *task, err error) {
 				MaxRetries: t.maxRetries,
 			})
 			s.storage.CompleteTask(context.Background(), t.id)
-			// StatusDead is considered a terminal failure for workflows unless handled
+			// Children registered via OnFailure(parent) treat both Dead
+			// (retries exhausted) and Failed (no retry strategy) as "the
+			// parent ultimately failed", so the resolution key here uses
+			// StatusFailed regardless of the precise terminal state. We
+			// also resolve StatusDead so any consumer that explicitly
+			// listens for the exhausted-retries signal gets it too.
+			s.resolveWorkflow(t, StatusFailed)
 			s.resolveWorkflow(t, StatusDead)
 		}
+		// Record the terminal failure in history now that the task is done.
+		s.mu.Lock()
+		s.recordHistory(t)
+		s.mu.Unlock()
 		if s.logger != nil {
 			s.logger.Error("task exceeded max retries and is now DEAD", err, "task_id", t.id, "attempts", t.attempts)
 		}
 		return
 	}
 
+	// A retry is available — park it in the wheel and mark the task as
+	// Retrying so the dashboard reflects "waiting for backoff" rather than
+	// the misleading "Failed".
 	if t.retryStrategy != nil {
 		delay, retry := t.retryStrategy.NextDelay(t.attempts)
 		if retry {
-			// Create a fresh task for the retry to avoid sharing state with the failed instance
+			s.mu.Lock()
+			if trackTask, ok := s.tasks[t.id]; ok {
+				trackTask.status = StatusRetrying
+			}
+			s.mu.Unlock()
+
 			retryTask := NewTask(t.job, t.priority, t.timeout)
-			retryTask.id = t.id // Preserve ID for tracking
+			retryTask.id = t.id // Preserve ID so Cancel + tracking align across attempts.
 			retryTask.attempts = t.attempts + 1
 			retryTask.maxRetries = t.maxRetries
 			retryTask.retryStrategy = t.retryStrategy
@@ -729,15 +788,31 @@ func (s *Scheduler) handleFailure(t *task, err error) {
 			retryTask.typeName = t.typeName
 			retryTask.payload = t.payload
 
-			// The retry is parked in the shared timing wheel rather than its own
-			// time.AfterFunc goroutine. retryTask.id is intentionally identical
-			// to t.id, so Scheduler.Cancel can reach this pending retry through
-			// the wheel's per-ID index and stop it from ever Submitting.
+			// The retry is parked in the shared timing wheel rather than its
+			// own time.AfterFunc goroutine. The same ID flows through Cancel
+			// to stop a pending retry mid-backoff.
 			_ = s.wheel.Schedule(retryTask.id, time.Now().Add(delay), func() {
 				s.Submit(retryTask)
 			})
+			return
 		}
 	}
+
+	// No retry strategy (or strategy declined) → terminal Failed. The
+	// distinction from Dead is intentional: Dead means "exhausted retries"
+	// and is resubmittable; Failed means "no safety net was configured" and
+	// is informational only.
+	s.mu.Lock()
+	if trackTask, ok := s.tasks[t.id]; ok {
+		trackTask.status = StatusFailed
+	}
+	s.mu.Unlock()
+	if t.typeName != "" {
+		s.resolveWorkflow(t, StatusFailed)
+	}
+	s.mu.Lock()
+	s.recordHistory(t)
+	s.mu.Unlock()
 }
 
 // Use adds middlewares to the scheduler.
@@ -998,10 +1073,45 @@ func (s *Scheduler) ScheduleRecurringTask(t *task, interval time.Duration) (stri
 	return t.id, nil
 }
 
+// Cancel stops the task identified by id from progressing further. The
+// behavior depends on what state the task is currently in:
+//
+//   - Running — the worker's context is cancelled; the worker observes
+//     ctx.Done() and finalizes the task as Cancelled.
+//   - Retrying / scheduled-in-wheel — the pending wheel entry is unlinked
+//     so the callback never re-enters the queue, the task is finalized as
+//     Cancelled here (no worker is going to see it otherwise), and history
+//     is recorded.
+//   - Queued — the task will be skipped by the next worker that pops it,
+//     because dispatch checks the cancelled flag before running.
+//   - Already terminal — no-op.
+//
+// Pre-fix this method only set the status and called wheel.Cancel; tasks
+// that were sitting in the wheel (never running) lingered in the active
+// map forever showing as "Cancelled" because no worker would ever fire to
+// drive the finalization path.
 func (s *Scheduler) Cancel(id string) error {
 	s.mu.Lock()
 	t, ok := s.tasks[id]
+	wasInactive := false
 	if ok {
+		// "Inactive" here means the task isn't being executed by a worker
+		// right now — it's parked in the wheel waiting to be Submitted, or
+		// already done. Those cases need explicit finalization because no
+		// worker is going to drive the ctx.Done() path.
+		switch t.status {
+		case StatusRunning:
+			// fall through — worker will finalize
+		case StatusSucceeded, StatusFailed, StatusDead, StatusCancelled:
+			// already terminal — nothing to do
+			s.mu.Unlock()
+			if s.wheel != nil {
+				s.wheel.Cancel(id)
+			}
+			return nil
+		default:
+			wasInactive = true
+		}
 		t.status = StatusCancelled
 		if t.cancel != nil {
 			t.cancel()
@@ -1009,17 +1119,36 @@ func (s *Scheduler) Cancel(id string) error {
 	}
 	s.mu.Unlock()
 
-	// Pull any in-flight wheel entry (retry backoff / scheduled fire) so its
-	// callback never runs after a cancel.
+	// Pull any in-flight wheel entry (retry backoff, ScheduleOnce, recurring
+	// arming) so its callback never enters the queue after cancel.
 	if s.wheel != nil {
 		s.wheel.Cancel(id)
 	}
 	s.storage.UnscheduleDelayed(context.Background(), id)
 
-	// Mark as cancelled in storage so it won't be picked up again if re-dequeued or in queue
+	// Mark cancelled in storage so a recovering instance or in-flight dequeue
+	// will skip it.
 	s.storage.MarkCancelled(context.Background(), id)
 
-	// Global cancel via storage for currently running tasks
+	// For tasks that weren't running, finalize the cancellation locally:
+	// record history, evict from the active map, release the dedup key.
+	// Skipped for running tasks because the worker's ctx.Done() branch
+	// already owns finalization for them.
+	if wasInactive && ok {
+		s.mu.Lock()
+		if t.key != "" {
+			delete(s.activeKeys, t.key)
+		}
+		s.recordHistory(t)
+		delete(s.tasks, id)
+		s.mu.Unlock()
+		if t.typeName != "" {
+			s.storage.CompleteTask(context.Background(), id)
+			s.resolveWorkflow(t, StatusCancelled)
+		}
+	}
+
+	// Cross-instance cancel for distributed deployments.
 	return s.storage.PublishCancel(context.Background(), id)
 }
 

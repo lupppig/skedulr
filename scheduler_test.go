@@ -1107,3 +1107,120 @@ func TestDeadCount(t *testing.T) {
 		t.Errorf("expected 0 dead tasks after resubmit, got %d", stats.DeadCount)
 	}
 }
+
+// TestRetryingStateVisible asserts that a task waiting in retry-backoff is
+// observable as StatusRetrying via the Stats API — not as StatusFailed (which
+// would suggest a terminal failure) and not absent from active_tasks (which
+// would hide it from the dashboard entirely).
+//
+// The retry backoff is deliberately long (1s) and the retry budget tiny (2
+// retries) so the Retrying window dominates the test timeline and we can
+// sample it reliably even under -race overhead.
+func TestRetryingStateVisible(t *testing.T) {
+	sch := skedulr.New()
+	defer sch.ShutDown(context.Background())
+
+	sch.RegisterJob("retry-visible", func(ctx context.Context) error {
+		return fmt.Errorf("always fails")
+	})
+
+	tObj := skedulr.NewPersistentTask("retry-visible", nil, 1, 0).
+		WithMaxRetries(2).
+		WithRetryStrategy(skedulr.NewLinearRetry(2, 1*time.Second))
+	id, _ := sch.Submit(tObj)
+
+	// Poll for up to 500ms for the Retrying transition to be observable.
+	// Initial attempt + handleFailure + status update is normally <50ms, but
+	// -race + GC pauses can push that out. Polling avoids a brittle fixed
+	// sleep while still exercising the same property.
+	var sawRetrying bool
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if sch.Status(id) == skedulr.StatusRetrying {
+			sawRetrying = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !sawRetrying {
+		t.Fatalf("status never reached StatusRetrying within 500ms; final = %v", sch.Status(id))
+	}
+
+	stats := sch.Stats()
+	foundRetrying := false
+	for _, at := range stats.ActiveTasks {
+		if at.ID == id && at.Status == "Retrying" {
+			foundRetrying = true
+		}
+	}
+	if !foundRetrying {
+		t.Error("dashboard active_tasks should include the retrying task with Status=Retrying")
+	}
+
+	// Wait for the chain to terminate: 2 retries × 1s = ~2s + initial attempt
+	// + slack. The whole thing finishes inside 4s comfortably.
+	deadline = time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if sch.Status(id) == skedulr.StatusDead {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Errorf("after exhaustion: want StatusDead, got %v", sch.Status(id))
+}
+
+// TestOnFailureFiresOnlyOnTerminalFailure asserts the workflow-children
+// contract: an OnFailure child should fire exactly once, after the parent has
+// finished retrying and entered a terminal failed state — not on every failed
+// attempt during the retry chain.
+func TestOnFailureFiresOnlyOnTerminalFailure(t *testing.T) {
+	sch := skedulr.New(skedulr.WithStorage(newDistributedMockForOnFailure()))
+	defer sch.ShutDown(context.Background())
+
+	var childFires int32
+	sch.RegisterJob("parent-fails", func(ctx context.Context) error {
+		return fmt.Errorf("oops")
+	})
+	sch.RegisterJob("on-failure-child", func(ctx context.Context) error {
+		atomic.AddInt32(&childFires, 1)
+		return nil
+	})
+
+	_, err := sch.Submit(
+		skedulr.NewPersistentTask("parent-fails", nil, 1, 0).
+			WithID("retrying-parent").
+			WithMaxRetries(2).
+			WithRetryStrategy(skedulr.NewLinearRetry(2, 80*time.Millisecond)),
+	)
+	if err != nil {
+		t.Fatalf("submit parent: %v", err)
+	}
+	_, err = sch.Submit(
+		skedulr.NewPersistentTask("on-failure-child", nil, 1, 0).
+			WithID("on-failure-child-task").
+			OnFailure("retrying-parent"),
+	)
+	if err != nil {
+		t.Fatalf("submit child: %v", err)
+	}
+
+	// Wait for the full retry chain plus child fire.
+	time.Sleep(1 * time.Second)
+
+	if got := atomic.LoadInt32(&childFires); got != 1 {
+		t.Errorf("OnFailure child should fire exactly once after Dead, got %d fires", got)
+	}
+}
+
+// newDistributedMockForOnFailure is a tiny helper because the OnFailure child
+// resolution requires a storage backend that implements ResolveDependencies
+// — InMemoryStorage stubs it out. We reuse the existing distributedMockStorage
+// constructor pattern.
+func newDistributedMockForOnFailure() *distributedMockStorage {
+	return &distributedMockStorage{
+		tasks:     make(map[string]*skedulr.PersistentTask),
+		leases:    make(map[string]string),
+		waiting:   make(map[string][]*skedulr.PersistentTask),
+		depCounts: make(map[string]int),
+	}
+}

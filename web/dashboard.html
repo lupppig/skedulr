@@ -5,19 +5,45 @@
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Skedulr Dashboard</title>
-	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+	<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 	<style>
+		/*
+		 * Gruvbox dark-hard palette — same colors as Gruvbox's terminal/IDE
+		 * themes so the dashboard sits comfortably alongside a developer's
+		 * usual environment. Every UI element pulls from these variables;
+		 * no glassmorphism, no translucency, no gradients on backgrounds.
+		 */
 		:root {
-			--bg-color: #0f111a;
-			--sidebar-bg: #161824;
-			--card-bg: #1c1f2e;
-			--text-color: #e2e8f0;
-			--text-muted: #94a3b8;
-			--primary: #3b82f6;
-			--secondary: #6366f1;
-			--success: #10b981;
-			--danger: #ef4444;
-			--border-color: #2d3142;
+			--bg0-h:    #1d2021; /* deepest background — page */
+			--bg0:      #282828; /* default background — cards */
+			--bg1:      #3c3836; /* lifted background — hovered rows, badges */
+			--bg2:      #504945; /* highest lifted — table headers, borders */
+			--bg3:      #665c54;
+			--fg0:      #fbf1c7; /* brightest foreground — primary text */
+			--fg1:      #ebdbb2; /* default foreground */
+			--fg2:      #d5c4a1;
+			--fg3:      #bdae93; /* muted foreground — labels */
+			--fg4:      #a89984; /* most muted */
+			--gray:     #928374;
+
+			--red:      #fb4934;
+			--green:    #b8bb26;
+			--yellow:   #fabd2f;
+			--blue:     #83a598;
+			--purple:   #d3869b;
+			--aqua:     #8ec07c;
+			--orange:   #fe8019;
+
+			--red-dim:    #cc241d;
+			--green-dim:  #98971a;
+			--yellow-dim: #d79921;
+			--blue-dim:   #458588;
+			--purple-dim: #b16286;
+			--aqua-dim:   #689d6a;
+			--orange-dim: #d65d0e;
+
+			--border:   #3c3836;
+			--border-strong: #504945;
 		}
 
 		* {
@@ -27,435 +53,526 @@
 		}
 
 		body {
-			font-family: 'Inter', sans-serif;
-			background-color: var(--bg-color);
-			color: var(--text-color);
+			font-family: 'Inter', system-ui, sans-serif;
+			background-color: var(--bg0-h);
+			color: var(--fg1);
 			display: flex;
 			min-height: 100vh;
 			overflow-x: hidden;
+			font-size: 14px;
 		}
 
-		/* Sidebar */
+		code, .mono { font-family: 'JetBrains Mono', monospace; }
+
+		/* ── Sidebar ────────────────────────────────────────────────── */
 		.sidebar {
-			width: 260px;
-			background-color: var(--sidebar-bg);
-			padding: 2rem 1.5rem;
+			width: 240px;
+			background-color: var(--bg0);
+			padding: 1.5rem 1rem;
 			display: flex;
 			flex-direction: column;
-			gap: 2rem;
-			border-right: 1px solid var(--border-color);
+			gap: 1.5rem;
+			border-right: 1px solid var(--border);
+			flex-shrink: 0;
 		}
 
 		.logo {
-			font-size: 1.5rem;
-			font-weight: 800;
-			background: linear-gradient(135deg, var(--primary), var(--secondary));
-			background-clip: text;
-			-webkit-background-clip: text;
-			-webkit-text-fill-color: transparent;
-			display: flex;
-			align-items: center;
-			gap: 0.5rem;
+			font-family: 'JetBrains Mono', monospace;
+			font-size: 1.25rem;
+			font-weight: 700;
+			color: var(--orange);
+			padding: 0 0.5rem;
+			letter-spacing: 0.05em;
 		}
+		.logo::before { content: ">_ "; color: var(--green); }
 
 		.nav-links {
 			list-style: none;
 			display: flex;
 			flex-direction: column;
-			gap: 0.5rem;
+			gap: 0.25rem;
 		}
 
 		.nav-item {
-			padding: 0.75rem 1rem;
-			border-radius: 8px;
+			padding: 0.6rem 0.75rem;
+			border-radius: 4px;
 			cursor: pointer;
-			transition: all 0.2s;
-			color: var(--text-muted);
+			color: var(--fg3);
 			font-weight: 500;
+			border-left: 2px solid transparent;
 		}
-
-		.nav-item.active,
 		.nav-item:hover {
-			background-color: rgba(255, 255, 255, 0.05);
-			color: var(--text-color);
+			background-color: var(--bg1);
+			color: var(--fg0);
+		}
+		.nav-item.active {
+			background-color: var(--bg1);
+			color: var(--orange);
+			border-left-color: var(--orange);
 		}
 
-		/* Main Content */
+		/* ── Main content ──────────────────────────────────────────── */
 		.main-content {
 			flex: 1;
-			padding: 2rem;
-			max-width: 1200px;
+			padding: 1.5rem 2rem;
+			max-width: 1400px;
 			margin: 0 auto;
+			width: 100%;
 		}
 
 		header {
 			display: flex;
 			justify-content: space-between;
 			align-items: center;
-			margin-bottom: 2rem;
+			margin-bottom: 1.5rem;
+			padding-bottom: 1rem;
+			border-bottom: 1px solid var(--border);
 		}
-
 		h1 {
-			font-size: 1.875rem;
+			font-size: 1.5rem;
 			font-weight: 600;
+			color: var(--fg0);
+		}
+		h2 {
+			font-size: 1.125rem;
+			font-weight: 600;
+			color: var(--fg0);
 		}
 
-		/* Metrics Grid */
-		.metrics-grid {
-			display: grid;
-			grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-			gap: 1.5rem;
-			margin-bottom: 2rem;
-		}
-
-		.metric-card {
-			background: var(--card-bg);
-			padding: 1.5rem;
-			border-radius: 12px;
-			border: 1px solid var(--border-color);
+		.header-controls {
 			display: flex;
-			flex-direction: column;
-			gap: 0.5rem;
+			align-items: center;
+			gap: 1rem;
 		}
-
-		.metric-label {
-			color: var(--text-muted);
-			font-size: 0.875rem;
-			text-transform: uppercase;
+		.pause-pill {
+			display: none;
+			align-items: center;
+			gap: 0.4rem;
+			padding: 0.3rem 0.6rem;
+			background: var(--bg1);
+			border: 1px solid var(--yellow);
+			border-radius: 3px;
+			font-size: 0.75rem;
+			font-weight: 700;
+			color: var(--yellow);
 			letter-spacing: 0.05em;
 		}
-
-		.metric-value {
-			font-size: 2rem;
-			font-weight: 700;
+		.pause-pill.visible { display: inline-flex; }
+		.pause-pill::before {
+			content: "";
+			width: 6px; height: 6px;
+			background: var(--yellow);
+			border-radius: 50%;
 		}
 
-		#metric-queue {
-			color: var(--primary);
+		.btn {
+			background: var(--bg1);
+			border: 1px solid var(--border-strong);
+			color: var(--fg1);
+			padding: 0.5rem 0.9rem;
+			border-radius: 4px;
+			cursor: pointer;
+			font-weight: 500;
+			font-size: 0.8125rem;
+			font-family: inherit;
+		}
+		.btn:hover { background: var(--bg2); color: var(--fg0); }
+		.btn-primary {
+			background: var(--blue-dim);
+			border-color: var(--blue-dim);
+			color: var(--bg0-h);
+		}
+		.btn-primary:hover { background: var(--blue); border-color: var(--blue); }
+		.btn-warn {
+			background: var(--yellow-dim);
+			border-color: var(--yellow-dim);
+			color: var(--bg0-h);
+		}
+		.btn-warn:hover { background: var(--yellow); border-color: var(--yellow); }
+
+		.live-dot {
+			width: 7px; height: 7px;
+			background: var(--green);
+			border-radius: 50%;
+			display: inline-block;
+			margin-right: 0.4rem;
+			box-shadow: 0 0 6px var(--green);
+			animation: pulse 2s infinite ease-in-out;
+		}
+		@keyframes pulse {
+			0%, 100% { opacity: 0.4; }
+			50%      { opacity: 1; }
 		}
 
-		#metric-success {
-			color: var(--success);
-		}
-
-		#metric-failure {
-			color: var(--danger);
-		}
-
-		.content-card {
-			background: var(--card-bg);
-			border-radius: 12px;
-			border: 1px solid var(--border-color);
-			overflow: hidden;
-			padding: 1.5rem;
-		}
-
-		.card-header {
+		/* ── Metrics grid ──────────────────────────────────────────── */
+		.metrics-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+			gap: 0.75rem;
 			margin-bottom: 1.5rem;
+		}
+		.metric-card {
+			background: var(--bg0);
+			padding: 1rem 1.25rem;
+			border-radius: 4px;
+			border: 1px solid var(--border);
+			border-left: 3px solid var(--gray);
+			display: flex;
+			flex-direction: column;
+			gap: 0.4rem;
+		}
+		.metric-card.queue    { border-left-color: var(--blue); }
+		.metric-card.success  { border-left-color: var(--green); }
+		.metric-card.failure  { border-left-color: var(--red); }
+		.metric-card.dead     { border-left-color: var(--purple); }
+		.metric-card.retrying { border-left-color: var(--yellow); }
+		.metric-card.workers  { border-left-color: var(--aqua); }
+
+		.metric-label {
+			color: var(--fg4);
+			font-size: 0.7rem;
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			font-weight: 600;
+		}
+		.metric-value {
+			font-family: 'JetBrains Mono', monospace;
+			font-size: 1.75rem;
+			font-weight: 700;
+			color: var(--fg0);
+			line-height: 1;
+		}
+		#metric-queue    { color: var(--blue); }
+		#metric-success  { color: var(--green); }
+		#metric-failure  { color: var(--red); }
+		#metric-dead     { color: var(--purple); }
+		#metric-retrying { color: var(--yellow); }
+		#metric-workers  { color: var(--aqua); }
+
+		/* ── Content cards ─────────────────────────────────────────── */
+		.content-card {
+			background: var(--bg0);
+			border-radius: 4px;
+			border: 1px solid var(--border);
+			padding: 1.25rem;
+			margin-bottom: 1.25rem;
+		}
+		.card-header {
+			margin-bottom: 1rem;
 			display: flex;
 			justify-content: space-between;
 			align-items: center;
+			gap: 1rem;
+			flex-wrap: wrap;
 		}
 
+		/* ── Pools ─────────────────────────────────────────────────── */
+		.pool-grid {
+			display: grid;
+			grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+			gap: 0.75rem;
+		}
+		.pool-card {
+			background: var(--bg0-h);
+			padding: 1rem;
+			border-radius: 4px;
+			border: 1px solid var(--border);
+		}
+		.pool-name {
+			font-family: 'JetBrains Mono', monospace;
+			font-size: 0.75rem;
+			color: var(--aqua);
+			text-transform: uppercase;
+			letter-spacing: 0.08em;
+			margin-bottom: 0.5rem;
+		}
+		.pool-worker-count {
+			font-family: 'JetBrains Mono', monospace;
+			font-size: 1.5rem;
+			font-weight: 700;
+			color: var(--fg0);
+			line-height: 1;
+		}
+		.pool-worker-label { font-size: 0.75rem; color: var(--fg4); margin-left: 0.3rem; }
+		.pool-controls {
+			display: flex;
+			align-items: center;
+			gap: 0.5rem;
+			margin-top: 0.75rem;
+		}
+		.pool-controls .btn {
+			width: 28px; height: 28px;
+			padding: 0;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-family: 'JetBrains Mono', monospace;
+			font-weight: 700;
+		}
+		.pool-counter {
+			font-family: 'JetBrains Mono', monospace;
+			font-size: 0.875rem;
+			font-weight: 600;
+			min-width: 28px;
+			text-align: center;
+			color: var(--fg0);
+		}
+		.pool-queue {
+			margin-top: 0.5rem;
+			font-size: 0.75rem;
+			color: var(--fg3);
+			font-family: 'JetBrains Mono', monospace;
+		}
+		.pool-queue strong { color: var(--blue); }
+
+		/* ── Filters ───────────────────────────────────────────────── */
+		.filter-row {
+			width: 100%;
+			display: flex;
+			gap: 0.5rem;
+			align-items: center;
+			flex-wrap: wrap;
+		}
+		.search-input {
+			background: var(--bg0-h);
+			border: 1px solid var(--border-strong);
+			color: var(--fg0);
+			padding: 0.45rem 0.7rem;
+			border-radius: 3px;
+			font-size: 0.8125rem;
+			font-family: inherit;
+			outline: none;
+		}
+		.search-input::placeholder { color: var(--fg4); }
+		.search-input:focus { border-color: var(--orange); }
+
+		.filter-group {
+			display: flex;
+			gap: 0.4rem;
+			flex-wrap: wrap;
+			margin-top: 0.75rem;
+		}
+		.filter-chip {
+			padding: 0.35rem 0.7rem;
+			border-radius: 3px;
+			background: var(--bg0-h);
+			border: 1px solid var(--border-strong);
+			color: var(--fg3);
+			font-size: 0.75rem;
+			font-weight: 600;
+			cursor: pointer;
+			user-select: none;
+			font-family: 'JetBrains Mono', monospace;
+			letter-spacing: 0.03em;
+		}
+		.filter-chip:hover {
+			background: var(--bg1);
+			color: var(--fg0);
+		}
+		.filter-chip.active {
+			background: var(--bg2);
+			color: var(--fg0);
+			border-color: var(--fg4);
+		}
+		.filter-chip.active[data-status=""]         { border-color: var(--orange); color: var(--orange); }
+		.filter-chip.active[data-status="Running"]  { border-color: var(--blue);   color: var(--blue); }
+		.filter-chip.active[data-status="Queued"]   { border-color: var(--aqua);   color: var(--aqua); }
+		.filter-chip.active[data-status="Retrying"] { border-color: var(--yellow); color: var(--yellow); }
+		.filter-chip.active[data-status="Succeeded"]{ border-color: var(--green);  color: var(--green); }
+		.filter-chip.active[data-status="Failed"]   { border-color: var(--red);    color: var(--red); }
+		.filter-chip.active[data-status="Dead"]     { border-color: var(--purple); color: var(--purple); }
+		.filter-chip.active[data-status="Cancelled"]{ border-color: var(--gray);   color: var(--fg3); }
+
+		/* ── Table ─────────────────────────────────────────────────── */
 		table {
 			width: 100%;
 			border-collapse: collapse;
 		}
-
 		th {
 			text-align: left;
-			color: var(--text-muted);
-			font-size: 0.75rem;
+			color: var(--fg4);
+			font-size: 0.7rem;
 			text-transform: uppercase;
-			padding: 1rem;
-			border-bottom: 1px solid var(--glass-border);
+			letter-spacing: 0.08em;
+			font-weight: 600;
+			padding: 0.6rem 0.75rem;
+			border-bottom: 1px solid var(--border-strong);
+			background: var(--bg0-h);
 		}
-
 		td {
-			padding: 1rem;
-			font-size: 0.875rem;
-			border-bottom: 1px solid var(--glass-border);
+			padding: 0.7rem 0.75rem;
+			font-size: 0.8125rem;
+			border-bottom: 1px solid var(--border);
+			vertical-align: middle;
+		}
+		tbody tr:hover { background: var(--bg1); }
+
+		.task-id {
+			font-family: 'JetBrains Mono', monospace;
+			font-size: 0.75rem;
+			color: var(--fg2);
+		}
+		.task-meta {
+			font-size: 0.7rem;
+			color: var(--fg4);
+			margin-top: 0.15rem;
+		}
+		.task-type {
+			color: var(--fg0);
+			font-weight: 500;
+		}
+		.task-priority {
+			font-family: 'JetBrains Mono', monospace;
+			color: var(--fg2);
 		}
 
+		/* ── Status badges (gruvbox per state) ──────────────────────── */
 		.status-badge {
-			padding: 0.25rem 0.6rem;
-			border-radius: 12px;
-			font-size: 0.75rem;
-			font-weight: 600;
-			text-transform: capitalize;
-		}
-
-		.status-running {
-			background: rgba(16, 185, 129, 0.1);
-			color: var(--success);
-		}
-
-		.status-queued {
-			background: rgba(0, 242, 255, 0.1);
-			color: var(--primary);
-		}
-
-		.status-retrying {
-			background: rgba(245, 158, 11, 0.1);
-			color: #f59e0b;
-		}
-
-		.status-succeeded {
-			background: rgba(16, 185, 129, 0.2);
-			color: var(--success);
-		}
-
-		.status-failed {
-			background: rgba(244, 63, 94, 0.15);
-			color: var(--danger);
-		}
-
-		.status-cancelled {
-			background: rgba(148, 163, 184, 0.1);
-			color: var(--text-muted);
-		}
-
-		.status-dead {
-			background: rgba(124, 58, 237, 0.15);
-			color: #a78bfa;
-			border: 1px solid rgba(124, 58, 237, 0.3);
-		}
-
-		.cancel-btn,
-		.resubmit-btn {
-			background: transparent;
-			border: 1px solid var(--danger);
-			color: var(--danger);
-			padding: 0.4rem 0.8rem;
-			border-radius: 6px;
-			cursor: pointer;
-			font-size: 0.75rem;
-			transition: all 0.2s;
-		}
-
-		.cancel-btn:hover {
-			background: var(--danger);
-			color: white;
-		}
-
-		.resubmit-btn {
-			background: rgba(167, 139, 250, 0.2);
-			border: 1px solid #a78bfa;
-			color: #a78bfa;
-			padding: 0.25rem 0.75rem;
-			border-radius: 6px;
-			cursor: pointer;
-			font-size: 0.75rem;
-			font-weight: 600;
-			transition: all 0.2s;
-			margin-right: 0.5rem;
-		}
-
-		.resubmit-btn:hover {
-			background: #a78bfa;
-			color: #1e293b;
-		}
-
-		.metric-dead {
-			color: #a78bfa !important;
-		}
-
-		/* Filter Chips */
-		.filter-group {
-			display: flex;
-			gap: 0.5rem;
-			flex-wrap: wrap;
-			margin-top: 1rem;
-		}
-
-		.filter-chip {
-			padding: 0.4rem 0.8rem;
-			border-radius: 20px;
-			background: rgba(255, 255, 255, 0.05);
-			border: 1px solid var(--border-color);
-			color: var(--text-muted);
-			font-size: 0.75rem;
-			font-weight: 600;
-			cursor: pointer;
-			transition: all 0.2s;
-			user-select: none;
-		}
-
-		.filter-chip:hover {
-			background: rgba(255, 255, 255, 0.1);
-			color: var(--text-color);
-		}
-
-		.filter-chip.active {
-			background: var(--primary);
-			border-color: var(--primary);
-			color: white;
-			box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
-		}
-
-		.filter-chip.active[data-status="Succeeded"] {
-			background: var(--success);
-			border-color: var(--success);
-			box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
-		}
-
-		.filter-chip.active[data-status="Failed"] {
-			background: var(--danger);
-			border-color: var(--danger);
-			box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
-		}
-
-		.filter-chip.active[data-status="Dead"] {
-			background: #7c3aed;
-			border-color: #7c3aed;
-			box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
-		}
-
-		.filter-chip.active[data-status="Running"] {
-			background: var(--secondary);
-			border-color: var(--secondary);
-			box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
-		}
-
-		.filter-chip.active[data-status="Queued"] {
-			background: var(--primary);
-			border-color: var(--primary);
-		}
-
-		.filter-chip.active[data-status="Cancelled"] {
-			background: var(--text-muted);
-			border-color: var(--text-muted);
-		}
-
-
-		/* Micro-animations */
-		@keyframes pulse {
-			0% {
-				transform: scale(1);
-				opacity: 0.8;
-			}
-
-			50% {
-				transform: scale(1.05);
-				opacity: 1;
-			}
-
-			100% {
-				transform: scale(1);
-				opacity: 0.8;
-			}
-		}
-
-		.live-indicator {
-			width: 8px;
-			height: 8px;
-			background: var(--success);
-			border-radius: 50%;
 			display: inline-block;
-			margin-right: 0.5rem;
-			animation: pulse 2s infinite ease-in-out;
+			padding: 0.2rem 0.55rem;
+			border-radius: 3px;
+			font-size: 0.7rem;
+			font-weight: 700;
+			text-transform: uppercase;
+			letter-spacing: 0.05em;
+			font-family: 'JetBrains Mono', monospace;
+			border: 1px solid;
+		}
+		.status-queued    { background: var(--bg1); color: var(--aqua);   border-color: var(--aqua-dim); }
+		.status-running   { background: var(--bg1); color: var(--blue);   border-color: var(--blue-dim); }
+		.status-retrying  { background: var(--bg1); color: var(--yellow); border-color: var(--yellow-dim); }
+		.status-succeeded { background: var(--bg1); color: var(--green);  border-color: var(--green-dim); }
+		.status-failed    { background: var(--bg1); color: var(--red);    border-color: var(--red-dim); }
+		.status-dead      { background: var(--bg1); color: var(--purple); border-color: var(--purple-dim); }
+		.status-cancelled { background: var(--bg1); color: var(--gray);   border-color: var(--bg3); }
+		.status-unknown   { background: var(--bg1); color: var(--fg4);    border-color: var(--bg3); }
+
+		/* ── Progress chip ─────────────────────────────────────────── */
+		.progress-chip {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			padding: 0.2rem 0.55rem;
+			border-radius: 3px;
+			font-family: 'JetBrains Mono', monospace;
+			font-weight: 700;
+			font-size: 0.75rem;
+			min-width: 52px;
+			border: 1px solid;
+		}
+		.progress-chip.queued, .progress-chip.running    { background: var(--bg1); color: var(--blue);   border-color: var(--blue-dim); }
+		.progress-chip.retrying                           { background: var(--bg1); color: var(--yellow); border-color: var(--yellow-dim); }
+		.progress-chip.succeeded                          { background: var(--bg1); color: var(--green);  border-color: var(--green-dim); }
+		.progress-chip.failed                             { background: var(--bg1); color: var(--red);    border-color: var(--red-dim); }
+		.progress-chip.dead                               { background: var(--bg1); color: var(--purple); border-color: var(--purple-dim); }
+		.progress-chip.cancelled                          { background: var(--bg1); color: var(--gray);   border-color: var(--bg3); }
+
+		/* ── Action buttons ────────────────────────────────────────── */
+		.action-btn {
+			background: transparent;
+			border: 1px solid;
+			padding: 0.3rem 0.7rem;
+			border-radius: 3px;
+			cursor: pointer;
+			font-size: 0.7rem;
+			font-family: 'JetBrains Mono', monospace;
+			font-weight: 700;
+			letter-spacing: 0.05em;
+			text-transform: uppercase;
+		}
+		.action-btn.cancel { border-color: var(--red-dim); color: var(--red); }
+		.action-btn.cancel:hover { background: var(--red-dim); color: var(--bg0-h); }
+		.action-btn.resubmit { border-color: var(--purple-dim); color: var(--purple); }
+		.action-btn.resubmit:hover { background: var(--purple-dim); color: var(--bg0-h); }
+
+		.muted-action {
+			color: var(--fg4);
+			font-size: 0.75rem;
+			font-family: 'JetBrains Mono', monospace;
+		}
+
+		.empty-row td {
+			text-align: center;
+			color: var(--fg4);
+			padding: 2.5rem;
+			font-style: italic;
 		}
 	</style>
 </head>
 
 <body>
-	<div class="sidebar">
-		<div class="logo">
-			SKEDULR
-		</div>
+	<aside class="sidebar">
+		<div class="logo">SKEDULR</div>
 		<ul class="nav-links">
-			<li class="nav-item active" onclick="showView('all')">Dashboard</li>
-			<li class="nav-item" onclick="showView('dlq')">Dead Tasks</li>
-			<li class="nav-item" onclick="document.querySelector('.metrics-grid').scrollIntoView({behavior:'smooth'})">
-				Workers</li>
+			<li class="nav-item active" data-view="all" onclick="showView('all')">Dashboard</li>
+			<li class="nav-item" data-view="retrying" onclick="showView('retrying')">Retrying</li>
+			<li class="nav-item" data-view="dlq" onclick="showView('dlq')">Dead Tasks</li>
+			<li class="nav-item" data-view="cancelled" onclick="showView('cancelled')">Cancelled</li>
 		</ul>
-	</div>
+	</aside>
 
-	<div class="main-content">
+	<main class="main-content">
 		<header>
-			<h1>System Overview</h1>
-			<div style="display: flex; align-items: center; gap: 1.5rem;">
-				<div id="pause-status" style="display: flex; align-items: center; gap: 0.5rem; display: none;">
-					<span
-						style="width: 8px; height: 8px; background: var(--danger); border-radius: 50%; display: inline-block;"></span>
-					<span style="font-size: 0.75rem; color: var(--danger); font-weight: 700;">PAUSED</span>
-				</div>
-				<button id="pause-btn" onclick="togglePause()" style="
-					background: var(--primary);
-					border: none;
-					color: white;
-					padding: 0.5rem 1rem;
-					border-radius: 8px;
-					cursor: pointer;
-					font-weight: 600;
-					font-size: 0.875rem;
-					transition: all 0.2s;
-				">Pause Scheduler</button>
-				<div>
-					<span class="live-indicator"></span>
-					<span style="font-size: 0.75rem; color: var(--text-muted)">LIVE UPDATES</span>
-				</div>
+			<h1 id="view-title">System Overview</h1>
+			<div class="header-controls">
+				<span id="pause-pill" class="pause-pill">PAUSED</span>
+				<button id="pause-btn" class="btn btn-primary" onclick="togglePause()">Pause Scheduler</button>
+				<span><span class="live-dot"></span><span style="font-size: 0.7rem; color: var(--fg4); font-weight: 600; letter-spacing: 0.05em;">LIVE</span></span>
 			</div>
 		</header>
 
 		<div class="metrics-grid">
-			<div class="metric-card">
+			<div class="metric-card queue">
 				<span class="metric-label">Queue Size</span>
 				<span class="metric-value" id="metric-queue">0</span>
 			</div>
-			<div class="metric-card">
+			<div class="metric-card retrying">
+				<span class="metric-label">Retrying</span>
+				<span class="metric-value" id="metric-retrying">0</span>
+			</div>
+			<div class="metric-card success">
 				<span class="metric-label">Processed</span>
 				<span class="metric-value" id="metric-success">0</span>
 			</div>
-			<div class="metric-card">
+			<div class="metric-card failure">
 				<span class="metric-label">Failed</span>
 				<span class="metric-value" id="metric-failure">0</span>
 			</div>
-			<div class="metric-card">
-				<span class="metric-label">Dead Tasks</span>
-				<span class="metric-value metric-dead" id="metric-dead">0</span>
+			<div class="metric-card dead">
+				<span class="metric-label">Dead</span>
+				<span class="metric-value" id="metric-dead">0</span>
 			</div>
-			<div class="metric-card">
-				<span class="metric-label">Active Workers</span>
-				<span class="metric-value" style="color: var(--secondary)" id="metric-workers">0</span>
-			</div>
-		</div>
-
-		<div class="content-card" style="margin-bottom: 2rem;">
-			<div class="card-header">
-				<h2 id="view-title">All Tasks</h2>
-			</div>
-			<div id="pool-list"
-				style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem;">
-				<!-- Loaded dynamically -->
+			<div class="metric-card workers">
+				<span class="metric-label">Workers</span>
+				<span class="metric-value" id="metric-workers">0</span>
 			</div>
 		</div>
 
 		<div class="content-card">
-			<div class="card-header" style="flex-direction: column; align-items: flex-start; gap: 1rem;">
-				<div style="width: 100%; display: flex; justify-content: space-between; align-items: center;">
-					<h2>Task Logs & Activity</h2>
-					<div style="display: flex; gap: 0.5rem; align-items: center;">
-						<input type="text" id="filter-query" placeholder="Search tasks..." oninput="fetchStats()"
-							style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.5rem 0.75rem; border-radius: 8px; font-size: 0.8125rem; width: 220px; outline: none; transition: border-color 0.2s;"
-							onfocus="this.style.borderColor='var(--primary)'"
-							onblur="this.style.borderColor='var(--border-color)'">
-						<input type="text" id="filter-type" placeholder="Job Type..." oninput="fetchStats()"
-							style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); padding: 0.5rem 0.75rem; border-radius: 8px; font-size: 0.8125rem; width: 120px; outline: none; transition: border-color 0.2s;"
-							onfocus="this.style.borderColor='var(--primary)'"
-							onblur="this.style.borderColor='var(--border-color)'">
+			<div class="card-header">
+				<h2>Worker Pools</h2>
+			</div>
+			<div class="pool-grid" id="pool-list"></div>
+		</div>
+
+		<div class="content-card">
+			<div class="card-header" style="flex-direction: column; align-items: stretch;">
+				<div style="display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;">
+					<h2 id="table-title">Task Logs &amp; Activity</h2>
+					<div class="filter-row" style="width: auto;">
+						<input type="text" id="filter-query" placeholder="Search ID or type..." oninput="fetchStats()" class="search-input" style="width: 220px;">
+						<input type="text" id="filter-type" placeholder="Job type..." oninput="fetchStats()" class="search-input" style="width: 140px;">
 					</div>
 				</div>
 				<div class="filter-group" id="status-chips">
-					<div class="filter-chip active" onclick="setFilterStatus('')" data-status="">All Statuses</div>
-					<div class="filter-chip" onclick="setFilterStatus('Running')" data-status="Running">Running</div>
-					<div class="filter-chip" onclick="setFilterStatus('Queued')" data-status="Queued">Queued</div>
-					<div class="filter-chip" onclick="setFilterStatus('Succeeded')" data-status="Succeeded">Succeeded
-					</div>
-					<div class="filter-chip" onclick="setFilterStatus('Failed')" data-status="Failed">Failed</div>
-					<div class="filter-chip" onclick="setFilterStatus('Dead')" data-status="Dead">Dead</div>
-					<div class="filter-chip" onclick="setFilterStatus('Cancelled')" data-status="Cancelled">Cancelled
-					</div>
+					<div class="filter-chip active" onclick="setFilterStatus('')"          data-status="">All</div>
+					<div class="filter-chip"        onclick="setFilterStatus('Queued')"    data-status="Queued">Queued</div>
+					<div class="filter-chip"        onclick="setFilterStatus('Running')"   data-status="Running">Running</div>
+					<div class="filter-chip"        onclick="setFilterStatus('Retrying')"  data-status="Retrying">Retrying</div>
+					<div class="filter-chip"        onclick="setFilterStatus('Succeeded')" data-status="Succeeded">Succeeded</div>
+					<div class="filter-chip"        onclick="setFilterStatus('Failed')"    data-status="Failed">Failed</div>
+					<div class="filter-chip"        onclick="setFilterStatus('Dead')"      data-status="Dead">Dead</div>
+					<div class="filter-chip"        onclick="setFilterStatus('Cancelled')" data-status="Cancelled">Cancelled</div>
 				</div>
 				<input type="hidden" id="filter-status" value="">
 			</div>
@@ -470,244 +587,227 @@
 						<th>Actions</th>
 					</tr>
 				</thead>
-				<tbody id="task-list">
-					<!-- Loaded dynamically -->
-				</tbody>
+				<tbody id="task-list"></tbody>
 			</table>
 		</div>
-	</div>
+	</main>
 
 	<script>
-		let currentView = 'all';
+		// ───────────────────────────────────────────────────────────
+		// Status taxonomy: keep one source of truth so badge classes,
+		// progress chip styling, and action availability all stay in
+		// sync if a new status is added on the server side.
+		// ───────────────────────────────────────────────────────────
+		const STATUS_META = {
+			Queued:    { class: "queued",    terminal: false, action: "cancel" },
+			Running:   { class: "running",   terminal: false, action: "cancel" },
+			Retrying:  { class: "retrying",  terminal: false, action: "cancel" },
+			Succeeded: { class: "succeeded", terminal: true,  action: null     },
+			Failed:    { class: "failed",    terminal: true,  action: null     },
+			Dead:      { class: "dead",      terminal: true,  action: "resubmit" },
+			Cancelled: { class: "cancelled", terminal: true,  action: null     },
+			Unknown:   { class: "unknown",   terminal: true,  action: null     },
+		};
+
+		let currentView = "all";
+		window.isPaused = false;
 
 		function showView(view) {
 			currentView = view;
-			const title = document.getElementById('view-title');
-			const navItems = document.querySelectorAll('.nav-item');
-
-			navItems.forEach(item => item.classList.remove('active'));
-
-			if (view === 'dlq') {
-				title.textContent = 'Dead Tasks';
-				navItems[1].classList.add('active');
-				setFilterStatus('Dead');
-			} else {
-				title.textContent = 'All Tasks';
-				navItems[0].classList.add('active');
-				setFilterStatus('');
-			}
-
-			document.querySelector('.content-card').scrollIntoView({ behavior: 'smooth' });
+			document.querySelectorAll(".nav-item").forEach(el => el.classList.toggle("active", el.dataset.view === view));
+			const titles = {
+				all:       ["System Overview",       "Task Logs & Activity"],
+				retrying:  ["Retrying Tasks",        "Tasks waiting for backoff"],
+				dlq:       ["Dead Tasks",            "Exhausted retries — resubmittable"],
+				cancelled: ["Cancelled Tasks",       "Tasks explicitly cancelled"],
+			};
+			const [hdr, tbl] = titles[view] || titles.all;
+			document.getElementById("view-title").textContent  = hdr;
+			document.getElementById("table-title").textContent = tbl;
+			const statusForView = { all: "", retrying: "Retrying", dlq: "Dead", cancelled: "Cancelled" }[view];
+			setFilterStatus(statusForView ?? "");
 		}
 
 		function setFilterStatus(status) {
-			document.getElementById('filter-status').value = status;
-			const chips = document.querySelectorAll('.filter-chip');
-			chips.forEach(chip => {
-				if (chip.getAttribute('data-status') === status) {
-					chip.classList.add('active');
-				} else {
-					chip.classList.remove('active');
-				}
+			document.getElementById("filter-status").value = status;
+			document.querySelectorAll(".filter-chip").forEach(chip => {
+				chip.classList.toggle("active", chip.dataset.status === status);
 			});
 			fetchStats();
 		}
 
 		async function fetchStats() {
 			try {
-				const query = document.getElementById('filter-query').value;
-				const type = document.getElementById('filter-type').value;
-				const status = document.getElementById('filter-status').value;
+				const q      = document.getElementById("filter-query").value;
+				const type   = document.getElementById("filter-type").value;
+				const status = document.getElementById("filter-status").value;
 				const params = new URLSearchParams();
-				if (query) params.append('q', query);
-				if (type) params.append('type', type);
-				if (status) params.append('status', status);
-
-				// Remove leading slash for deployment under prefix
-				const response = await fetch(`api/stats?${params.toString()}`);
-				const stats = await response.json();
-				updateUI(stats);
-			} catch (error) {
-				console.error('Failed to fetch stats:', error);
+				if (q)      params.append("q", q);
+				if (type)   params.append("type", type);
+				if (status) params.append("status", status);
+				const r = await fetch(`api/stats?${params.toString()}`);
+				if (!r.ok) return;
+				updateUI(await r.json());
+			} catch (e) {
+				console.error("fetchStats:", e);
 			}
 		}
 
 		function updateUI(stats) {
-			document.getElementById('metric-queue').textContent = stats.queue_size;
-			document.getElementById('metric-success').textContent = stats.success_count;
-			document.getElementById('metric-failure').textContent = stats.failure_count;
-			document.getElementById('metric-dead').textContent = stats.dead_count || 0;
-			document.getElementById('metric-workers').textContent = stats.current_workers;
+			// ── Counters ──────────────────────────────────────────
+			document.getElementById("metric-queue").textContent    = stats.queue_size ?? 0;
+			document.getElementById("metric-success").textContent  = stats.success_count ?? 0;
+			document.getElementById("metric-failure").textContent  = stats.failure_count ?? 0;
+			document.getElementById("metric-dead").textContent     = stats.dead_count ?? 0;
+			document.getElementById("metric-workers").textContent  = stats.current_workers ?? 0;
+			// Retrying count is derived client-side from active_tasks since the
+			// server stats struct doesn't carry it (it would be a per-status
+			// breakdown otherwise).
+			const retryingCount = (stats.active_tasks || []).filter(t => t.status === "Retrying").length;
+			document.getElementById("metric-retrying").textContent = retryingCount;
 
-			const pauseBtn = document.getElementById('pause-btn');
-			const pauseStatus = document.getElementById('pause-status');
-			if (stats.is_paused) {
-				pauseBtn.textContent = 'Resume Scheduler';
-				pauseBtn.style.background = 'var(--success)';
-				pauseStatus.style.display = 'flex';
-				window.isPaused = true;
+			// ── Pause state ───────────────────────────────────────
+			const pauseBtn  = document.getElementById("pause-btn");
+			const pausePill = document.getElementById("pause-pill");
+			window.isPaused = !!stats.is_paused;
+			if (window.isPaused) {
+				pauseBtn.textContent = "Resume Scheduler";
+				pauseBtn.classList.remove("btn-primary");
+				pauseBtn.classList.add("btn-warn");
+				pausePill.classList.add("visible");
 			} else {
-				pauseBtn.textContent = 'Pause Scheduler';
-				pauseBtn.style.background = 'var(--primary)';
-				pauseStatus.style.display = 'none';
-				window.isPaused = false;
+				pauseBtn.textContent = "Pause Scheduler";
+				pauseBtn.classList.remove("btn-warn");
+				pauseBtn.classList.add("btn-primary");
+				pausePill.classList.remove("visible");
 			}
 
-			const poolList = document.getElementById('pool-list');
-			poolList.innerHTML = '';
+			// ── Pool cards ────────────────────────────────────────
+			const poolList = document.getElementById("pool-list");
+			poolList.innerHTML = "";
 			(stats.pools || []).forEach(pool => {
-				const card = document.createElement('div');
-				card.style = "background: rgba(255,255,255,0.03); padding: 1rem; border-radius: 12px; border: 1px solid var(--glass-border);";
+				const card = document.createElement("div");
+				card.className = "pool-card";
 				card.innerHTML = `
-                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">${pool.name}</div>
-                    <div style="font-size: 1.25rem; font-weight: 600; margin: 0.25rem 0;">${pool.workers} Workers</div>
-                    <div style="display: flex; align-items: center; gap: 0.5rem; margin-top: 0.5rem;">
-                        <button onclick="scalePool('${pool.name}', ${pool.workers - 1})" style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); width: 24px; height: 24px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center;">-</button>
-                        <span style="font-size: 0.8125rem; font-weight: 600; min-width: 20px; text-align: center;">${pool.workers}</span>
-                        <button onclick="scalePool('${pool.name}', ${pool.workers + 1})" style="background: rgba(255,255,255,0.05); border: 1px solid var(--border-color); color: var(--text-color); width: 24px; height: 24px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center;">+</button>
-                    </div>
-                    <div style="font-size: 0.75rem; color: var(--primary); margin-top: 0.5rem;">Queue: ${pool.queue_size}</div>
-                `;
+					<div class="pool-name">${escapeHTML(pool.name)}</div>
+					<div>
+						<span class="pool-worker-count">${pool.workers}</span>
+						<span class="pool-worker-label">workers</span>
+					</div>
+					<div class="pool-controls">
+						<button class="btn" onclick="scalePool('${escapeAttr(pool.name)}', ${pool.workers - 1})">−</button>
+						<span class="pool-counter">${pool.workers}</span>
+						<button class="btn" onclick="scalePool('${escapeAttr(pool.name)}', ${pool.workers + 1})">+</button>
+					</div>
+					<div class="pool-queue">queue: <strong>${pool.queue_size}</strong></div>
+				`;
 				poolList.appendChild(card);
 			});
 
-			const list = document.getElementById('task-list');
-			list.innerHTML = '';
-
-			// Merge active + history, deduplicating by ID (history wins for terminal states)
-			const taskMap = new Map();
-			(stats.history || []).forEach(t => taskMap.set(t.id, t));
-			(stats.active_tasks || []).forEach(t => {
-				if (!taskMap.has(t.id)) taskMap.set(t.id, t);
+			// ── Task table ────────────────────────────────────────
+			// Active tasks reflect the live state — they win over history.
+			// History fills in the long tail of terminal tasks already
+			// evicted from the active map.
+			const list = document.getElementById("task-list");
+			list.innerHTML = "";
+			const seen = new Map();
+			(stats.active_tasks || []).forEach(t => seen.set(t.id, t));
+			(stats.history || []).forEach(t => {
+				if (!seen.has(t.id)) seen.set(t.id, t);
 			});
-			const allTasks = Array.from(taskMap.values());
+			const tasks = Array.from(seen.values());
 
-			if (allTasks.length > 0) {
-				allTasks.forEach(task => {
-					const row = document.createElement('tr');
-					const status = task.status;
-					let statusClass = 'status-queued';
-					if (status === 'Running') statusClass = 'status-running';
-					if (status === 'Succeeded') statusClass = 'status-succeeded';
-					if (status === 'Failed') statusClass = 'status-failed';
-					if (status === 'Dead') statusClass = 'status-dead';
-					if (status === 'Cancelled') statusClass = 'status-cancelled';
+			if (tasks.length === 0) {
+				const tr = document.createElement("tr");
+				tr.className = "empty-row";
+				tr.innerHTML = `<td colspan="6">No matching tasks yet.</td>`;
+				list.appendChild(tr);
+				return;
+			}
 
-					const isTerminal = status === 'Succeeded' || status === 'Failed' || status === 'Dead' || status === 'Cancelled';
+			for (const task of tasks) {
+				const meta = STATUS_META[task.status] || STATUS_META.Unknown;
+				const tr = document.createElement("tr");
 
-					// Calculate progress
-					let progressValue = task.progress || 0;
-					let boxColor = 'var(--primary)';
-					let boxBg = 'rgba(59, 130, 246, 0.1)'; // Default for queued/running
+				const progressValue = task.status === "Succeeded" ? 100 : (task.progress ?? 0);
 
-					if (status === 'Succeeded') {
-						progressValue = 100;
-						boxColor = 'var(--success)';
-						boxBg = 'rgba(16, 185, 129, 0.1)';
-					} else if (status === 'Failed') {
-						boxColor = 'var(--danger)';
-						boxBg = 'rgba(239, 68, 68, 0.1)';
-					} else if (status === 'Dead') {
-						boxColor = '#a78bfa';
-						boxBg = 'rgba(167, 139, 250, 0.1)';
-					} else if (status === 'Cancelled') {
-						boxColor = 'var(--text-muted)';
-						boxBg = 'rgba(148, 163, 184, 0.1)';
-					}
+				let actionCell = `<span class="muted-action">—</span>`;
+				if (meta.action === "cancel") {
+					actionCell = `<button class="action-btn cancel" onclick="cancelTask('${escapeAttr(task.id)}')">Cancel</button>`;
+				} else if (meta.action === "resubmit") {
+					actionCell = `<button class="action-btn resubmit" onclick="resubmitTask('${escapeAttr(task.id)}')">Resubmit</button>`;
+				} else if (task.status === "Cancelled") {
+					actionCell = `<span class="muted-action">cancelled</span>`;
+				}
 
-					const progressHtml = `
-						<div style="
-							display: inline-flex;
-							align-items: center;
-							justify-content: center;
-							padding: 4px 10px;
-							border-radius: 6px;
-							background: ${boxBg};
-							border: 1px solid ${boxColor};
-							color: ${boxColor};
-							font-weight: 700;
-							font-size: 0.9rem;
-							min-width: 60px;
-						">
-							${progressValue}%
-						</div>
-					`;
-
-					row.innerHTML = `
-                        <td style="font-family: monospace; font-size: 0.75rem;">${task.id}</td>
-                        <td>
-							${task.type || 'In-Memory'}
-							<div style="font-size: 0.7rem; color: var(--text-muted)">Pool: ${task.pool || 'default'}</div>
-						</td>
-                        <td>${task.priority}</td>
-                        <td><span class="status-badge ${statusClass}">${status}</span></td>
-						<td>${progressHtml}</td>
-                        <td>
-                            ${status === 'Cancelled' ? '<span style="color: var(--text-muted); font-size: 0.75rem; font-weight: 600;">Cancelled</span>' :
-							(status === 'Dead' ? `<button class="resubmit-btn" onclick="resubmitTask('${task.id}')">Resubmit</button>` :
-								(isTerminal ? '-' : `<button class="cancel-btn" onclick="cancelTask('${task.id}')">Cancel</button>`))}
-                        </td>
-                    `;
-					list.appendChild(row);
-				});
-			} else {
-				list.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">No system activity detected yet.</td></tr>';
+				tr.innerHTML = `
+					<td><span class="task-id">${escapeHTML(task.id)}</span></td>
+					<td>
+						<div class="task-type">${escapeHTML(task.type || "(in-memory)")}</div>
+						<div class="task-meta">pool: ${escapeHTML(task.pool || "default")}</div>
+					</td>
+					<td><span class="task-priority">${task.priority}</span></td>
+					<td><span class="status-badge status-${meta.class}">${escapeHTML(task.status)}</span></td>
+					<td><span class="progress-chip ${meta.class}">${progressValue}%</span></td>
+					<td>${actionCell}</td>
+				`;
+				list.appendChild(tr);
 			}
 		}
 
+		// ── Action helpers ────────────────────────────────────────────
 		async function cancelTask(id) {
 			try {
-				await fetch(`api/cancel?id=${id}`, { method: 'POST' });
-				setTimeout(fetchStats, 300); // Brief delay for backend to process
-			} catch (error) {
-				console.error('Failed to cancel task:', error);
-			}
+				await fetch(`api/cancel?id=${encodeURIComponent(id)}`, { method: "POST" });
+				setTimeout(fetchStats, 200);
+			} catch (e) { console.error("cancelTask:", e); }
 		}
 
 		async function resubmitTask(id) {
 			try {
-				await fetch(`api/resubmit?id=${id}`, { method: 'POST' });
-				setTimeout(fetchStats, 300); // Brief delay for backend to process
-			} catch (error) {
-				console.error('Failed to resubmit task:', error);
-			}
+				await fetch(`api/resubmit?id=${encodeURIComponent(id)}`, { method: "POST" });
+				setTimeout(fetchStats, 200);
+			} catch (e) { console.error("resubmitTask:", e); }
 		}
 
 		async function togglePause() {
-			const endpoint = window.isPaused ? 'api/resume' : 'api/pause';
+			const endpoint = window.isPaused ? "api/resume" : "api/pause";
 			try {
-				await fetch(endpoint, { method: 'POST' });
+				await fetch(endpoint, { method: "POST" });
 				fetchStats();
-			} catch (error) {
-				console.error('Failed to toggle pause:', error);
-			}
+			} catch (e) { console.error("togglePause:", e); }
 		}
 
-		let scaleTimeout = null;
-		async function scalePool(pool, count) {
+		// Debounce rapid +/- clicks so we don't hammer the API.
+		let scaleTimer = null;
+		function scalePool(pool, count) {
 			if (count < 0) count = 0;
 			if (count > 100) count = 100;
-
-			// UI feedback immediately
-			fetchStats();
-
-			if (scaleTimeout) clearTimeout(scaleTimeout);
-			scaleTimeout = setTimeout(async () => {
+			fetchStats(); // optimistic update
+			if (scaleTimer) clearTimeout(scaleTimer);
+			scaleTimer = setTimeout(async () => {
 				try {
-					const response = await fetch(`api/scale?pool=${pool}&count=${count}`, { method: 'POST' });
-					if (response.status === 429) {
-						console.warn('Scaling throttled');
-					}
+					await fetch(`api/scale?pool=${encodeURIComponent(pool)}&count=${count}`, { method: "POST" });
 					fetchStats();
-				} catch (error) {
-					console.error('Failed to scale pool:', error);
-				}
-			}, 300);
+				} catch (e) { console.error("scalePool:", e); }
+			}, 250);
 		}
 
-		// Poll every 1 second
+		// HTML-escape helpers — task IDs and pool names come from user code
+		// and could carry quotes or angle brackets that would otherwise
+		// break our template literals or open injection holes.
+		function escapeHTML(s) {
+			return String(s ?? "").replace(/[&<>"']/g, c => ({
+				"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+			}[c]));
+		}
+		function escapeAttr(s) {
+			return String(s ?? "").replace(/['"\\]/g, "\\$&");
+		}
+
+		// Poll every second; first call kicks off immediately.
 		setInterval(fetchStats, 1000);
-		fetchStats(); // Initial load
+		fetchStats();
 	</script>
 </body>
 
