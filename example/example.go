@@ -34,8 +34,9 @@ import (
 
 func main() {
 	// ─── 1. Create the scheduler ──────────────────────────────────────────
-	// REDIS_ADDR is optional — without it we still get an in-memory scheduler
-	// (no crash-restart durability, but every other feature works).
+	// Redis is required. Override the address with REDIS_ADDR if your instance
+	// is not on the default localhost:6379 (the run_example.sh script spins one
+	// up via Docker automatically).
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
