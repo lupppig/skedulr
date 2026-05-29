@@ -74,6 +74,31 @@ var (
 		return task_data
 	`)
 
+	// luaPopDueDelayed atomically (a) selects every delayed-task ID whose
+	// fireAt has elapsed, (b) removes them from the delayed ZSET in one ZREM,
+	// and (c) returns the persisted task bodies. The atomicity matters when
+	// multiple Scheduler instances share the same Redis — exactly one of them
+	// observes any given due task, because the ZREM happens before the read
+	// of GET resolves on any other connection.
+	//
+	// KEYS[1] = delayed ZSET key (e.g. "skedulr:task:delayed")
+	// ARGV[1] = now (unix ms) — every member with score <= ARGV[1] is "due"
+	// ARGV[2] = max batch size — caps the per-call work for the script
+	// ARGV[3] = task key prefix — used to GET the PersistentTask body
+	luaPopDueDelayed = redis.NewScript(`
+		local due = redis.call("ZRANGEBYSCORE", KEYS[1], 0, ARGV[1], "LIMIT", 0, ARGV[2])
+		if #due == 0 then return {} end
+		redis.call("ZREM", KEYS[1], unpack(due))
+		local tasks = {}
+		for _, id in ipairs(due) do
+			local data = redis.call("GET", ARGV[3] .. id)
+			if data then
+				table.insert(tasks, data)
+			end
+		end
+		return tasks
+	`)
+
 	luaRecover = redis.NewScript(`
 		local processing_key = KEYS[1]
 		local prefix = ARGV[1]
@@ -126,6 +151,20 @@ type Storage interface {
 	IsCancelled(ctx context.Context, id string) (bool, error)
 	CompleteTask(ctx context.Context, id string) error
 	RecoverOrphaned(ctx context.Context) (int, error)
+	// ScheduleDelayed durably records that task t should fire at fireAtMs
+	// (unix ms). Persisting the task body alongside the ZSET entry lets a
+	// fresh Scheduler instance hydrate its timing wheel directly from Redis
+	// after a restart, without consulting the original submitter.
+	ScheduleDelayed(ctx context.Context, taskID string, fireAtMs int64, t *PersistentTask) error
+	// UnscheduleDelayed removes a previously-scheduled delayed task by ID.
+	// Scheduler.Cancel calls this so a task cancelled before its fire time
+	// never resurfaces in PopDueDelayed.
+	UnscheduleDelayed(ctx context.Context, taskID string) error
+	// PopDueDelayed atomically removes and returns every delayed task whose
+	// fire time is <= now, capped at max entries. The atomicity is the
+	// multi-instance safety property — across N Scheduler instances sharing
+	// the same Redis, each due task is delivered to exactly one caller.
+	PopDueDelayed(ctx context.Context, now time.Time, max int) ([]*PersistentTask, error)
 }
 
 // InMemoryStorage is a basic storage implementation used as a fallback.
@@ -201,6 +240,22 @@ func (s *InMemoryStorage) CompleteTask(ctx context.Context, id string) error {
 
 func (s *InMemoryStorage) RecoverOrphaned(ctx context.Context) (int, error) {
 	return 0, nil
+}
+
+// InMemoryStorage's delayed-task methods are deliberately no-ops: the
+// in-memory backend has no durable layer behind the timing wheel, so there
+// is nothing to persist or hydrate. The wheel itself still does its job in
+// memory; only crash-restart durability is forfeit.
+func (s *InMemoryStorage) ScheduleDelayed(ctx context.Context, taskID string, fireAtMs int64, t *PersistentTask) error {
+	return nil
+}
+
+func (s *InMemoryStorage) UnscheduleDelayed(ctx context.Context, taskID string) error {
+	return nil
+}
+
+func (s *InMemoryStorage) PopDueDelayed(ctx context.Context, now time.Time, max int) ([]*PersistentTask, error) {
+	return nil, nil
 }
 
 // RedisStorage implements Storage using Redis.
@@ -422,6 +477,78 @@ func (s *RedisStorage) IsCancelled(ctx context.Context, id string) (bool, error)
 	key := s.prefix + "cancelled:" + id
 	n, err := s.client.Exists(ctx, key).Result()
 	return n > 0, err
+}
+
+// delayedKey returns the ZSET key that stores every scheduled-but-not-yet-due
+// task ID for this storage's prefix, scored by fire-at in unix ms. Held in a
+// helper so the key derivation stays in one place across the three methods
+// that touch it.
+func (s *RedisStorage) delayedKey() string { return s.prefix + "delayed" }
+
+// ScheduleDelayed persists t under its task key and, in the same pipeline,
+// adds the task ID to the delayed ZSET scored by fireAtMs. Bundling both
+// writes into one pipeline keeps the persisted-body and ZSET membership
+// invariants aligned for the common success case; on a partial failure the
+// hydrator's GET-by-ID will simply skip an orphan entry. Passing t == nil
+// is supported for callers that have already persisted the body separately.
+func (s *RedisStorage) ScheduleDelayed(ctx context.Context, taskID string, fireAtMs int64, t *PersistentTask) error {
+	if taskID == "" {
+		return fmt.Errorf("ScheduleDelayed: empty taskID")
+	}
+	pipe := s.client.Pipeline()
+	if t != nil {
+		data, err := json.Marshal(t)
+		if err != nil {
+			return fmt.Errorf("ScheduleDelayed marshal: %w", err)
+		}
+		pipe.Set(ctx, s.prefix+taskID, data, 0)
+	}
+	pipe.ZAdd(ctx, s.delayedKey(), redis.Z{
+		Score:  float64(fireAtMs),
+		Member: taskID,
+	})
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// UnscheduleDelayed removes taskID from the delayed ZSET. The task body is
+// intentionally left in place: the Scheduler may still need to track the
+// task's cancelled state, and CompleteTask / Delete own the body's lifecycle.
+// A no-op for the empty ID keeps callers from having to guard themselves.
+func (s *RedisStorage) UnscheduleDelayed(ctx context.Context, taskID string) error {
+	if taskID == "" {
+		return nil
+	}
+	return s.client.ZRem(ctx, s.delayedKey(), taskID).Err()
+}
+
+// PopDueDelayed runs the luaPopDueDelayed Lua script to atomically claim every
+// task whose fire time has passed. A non-positive max is treated as a request
+// for the default batch size (100) — guards a hydrator that forgot to cap
+// itself from pulling an unbounded backlog into memory. redis.Nil is returned
+// as a nil slice, not an error, since "nothing due" is the steady state.
+func (s *RedisStorage) PopDueDelayed(ctx context.Context, now time.Time, max int) ([]*PersistentTask, error) {
+	if max <= 0 {
+		max = 100
+	}
+	res, err := luaPopDueDelayed.Run(ctx, s.client,
+		[]string{s.delayedKey()},
+		now.UnixMilli(), max, s.prefix,
+	).StringSlice()
+	if err != nil {
+		if err == redis.Nil {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("PopDueDelayed: %w", err)
+	}
+	tasks := make([]*PersistentTask, 0, len(res))
+	for _, data := range res {
+		var t PersistentTask
+		if err := json.Unmarshal([]byte(data), &t); err == nil {
+			tasks = append(tasks, &t)
+		}
+	}
+	return tasks, nil
 }
 
 func (s *RedisStorage) RecoverOrphaned(ctx context.Context) (int, error) {

@@ -496,6 +496,18 @@ func (m *distributedMockStorage) RecoverOrphaned(ctx context.Context) (int, erro
 	return 0, nil
 }
 
+func (m *distributedMockStorage) ScheduleDelayed(ctx context.Context, taskID string, fireAtMs int64, t *skedulr.PersistentTask) error {
+	return nil
+}
+
+func (m *distributedMockStorage) UnscheduleDelayed(ctx context.Context, taskID string) error {
+	return nil
+}
+
+func (m *distributedMockStorage) PopDueDelayed(ctx context.Context, now time.Time, max int) ([]*skedulr.PersistentTask, error) {
+	return nil, nil
+}
+
 func TestDistributedCoordination(t *testing.T) {
 	storage := &distributedMockStorage{
 		tasks:  make(map[string]*skedulr.PersistentTask),
